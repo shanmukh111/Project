@@ -2,6 +2,8 @@ import os
 import re
 import subprocess
 import json
+import time
+from threading import Lock
 import httpx
 from dotenv import load_dotenv
 
@@ -22,11 +24,31 @@ DATAVERSE_ENTITY_SET = os.getenv(
     "cr1e5_timeentries"
 )
 
+# ---------------------------------------------------------
+# Token cache
+#
+# get_access_token() previously launched a fresh PowerShell
+# process on every single call. When a question touches many
+# projects (e.g. several at-risk projects in one request), this
+# was called once per project and dominated total latency,
+# which is what was causing Copilot Studio to perceive a
+# timeout and retry the whole request.
+#
+# Azure AD access tokens are typically valid ~60-90 minutes.
+# We cache for a conservative 45 minutes and refetch after that.
+# ---------------------------------------------------------
 
-def get_access_token() -> str:
+_TOKEN_CACHE_TTL_SECONDS = 45 * 60
+
+_cached_token: str | None = None
+_cached_token_fetched_at: float = 0.0
+_token_lock = Lock()
+
+
+def _fetch_access_token_from_powershell() -> str:
     """
-    Gets a Dataverse access token using the already authenticated
-    Azure PowerShell session.
+    Gets a fresh Dataverse access token using the already
+    authenticated Azure PowerShell session.
 
     Security:
     - Suppresses PowerShell warning/progress noise.
@@ -105,6 +127,48 @@ def get_access_token() -> str:
         )
 
     return token
+
+
+def get_access_token() -> str:
+    """
+    Returns a cached Dataverse access token, refetching from
+    PowerShell only when the cache is empty or has aged past
+    _TOKEN_CACHE_TTL_SECONDS.
+
+    This avoids launching a new PowerShell process for every
+    Dataverse call — previously happened once per project when
+    a question touched multiple projects, which dominated
+    request latency.
+    """
+
+    global _cached_token
+    global _cached_token_fetched_at
+
+    now = time.time()
+
+    if (
+        _cached_token is not None
+        and (now - _cached_token_fetched_at)
+        < _TOKEN_CACHE_TTL_SECONDS
+    ):
+        return _cached_token
+
+    with _token_lock:
+        now = time.time()
+
+        if (
+            _cached_token is not None
+            and (now - _cached_token_fetched_at)
+            < _TOKEN_CACHE_TTL_SECONDS
+        ):
+            return _cached_token
+
+        _cached_token = (
+            _fetch_access_token_from_powershell()
+        )
+        _cached_token_fetched_at = now
+
+        return _cached_token
 
 def get_headers() -> dict:
     token = get_access_token()

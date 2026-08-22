@@ -1,28 +1,55 @@
-import base64
-from security.authorization import AuthorizationError
-from security.pii_filter import anonymize_pii
-from security.prompt_guard import (
-    PromptInjectionError,
-    validate_user_prompt,
-)
-from security.output_filter import redact_secrets
+import os
 from contextlib import asynccontextmanager
-from io import BytesIO
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import (
     FastAPI,
     HTTPException,
 )
 
-from openpyxl import load_workbook
+from fastapi.responses import FileResponse
+
 from pydantic import BaseModel
+
+from security.authorization import (
+    AuthorizationError,
+    SessionExpiredError,
+    create_login_session,
+    end_login_session,
+    resolve_login_session,
+)
+
+from security.pii_filter import anonymize_pii
+
+from security.prompt_guard import (
+    PromptInjectionError,
+    validate_user_prompt,
+)
+
+from security.output_filter import redact_secrets
+
 
 from orchestration.delivery_workflow import (
     run_delivery_workflow,
 )
 
+from reporting.charts import REPORTS_DIR
+
 from retrieval.hybrid_rag import (
     initialize_hybrid_rag,
+)
+
+
+# ---------------------------------------------------------
+# Public URL for Copilot Studio access
+# ---------------------------------------------------------
+
+PUBLIC_URL = os.getenv(
+    "PUBLIC_URL",
+    "https://bmvxdh1s-8000.asse.devtunnels.ms"
 )
 
 
@@ -62,13 +89,13 @@ app = FastAPI(
         "MAQ Intelligent "
         "Client Delivery Agent"
     ),
-    version="0.5.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
 
 # ---------------------------------------------------------
-# Request model
+# Request models
 # ---------------------------------------------------------
 
 class DeliveryQueryRequest(
@@ -76,9 +103,18 @@ class DeliveryQueryRequest(
 ):
 
     user_question: str
+    session_id: str
+
+
+class LoginRequest(BaseModel):
+
     user_id: str
-    file_name: str
-    file_content_base64: str
+
+
+class LogoutRequest(BaseModel):
+
+    session_id: str
+
 
 
 # ---------------------------------------------------------
@@ -95,219 +131,139 @@ async def health():
         ),
         "environment": "dev",
         "hybrid_rag": "ready",
-        "architecture": "multi-agent",
-        "agents": 3,
+        "architecture": (
+            "single-agent-retrieval "
+            "+ insight-orchestrator"
+        ),
+        "agents": 2,
     }
 
 
-# ---------------------------------------------------------
-# SharePoint workbook parser
-# ---------------------------------------------------------
-
-def parse_project_register(
-    file_content_base64: str,
-) -> list[dict]:
-    """
-    Parse the SharePoint-hosted Excel workbook
-    and return MAQProjectRegister records.
-    """
-
-    workbook_bytes = (
-        base64.b64decode(
-            file_content_base64
-        )
-    )
-
-    workbook = load_workbook(
-        BytesIO(
-            workbook_bytes
-        ),
-        data_only=True,
-    )
-
-    target_sheet = None
-    target_table = None
-
-    for sheet in workbook.worksheets:
-
-        for table in (
-            sheet.tables.values()
-        ):
-
-            if (
-                table.name
-                == "MAQProjectRegister"
-            ):
-
-                target_sheet = sheet
-                target_table = table
-
-                break
-
-        if target_table:
-            break
-
-    if (
-        target_sheet is None
-        or target_table is None
-    ):
-
-        raise ValueError(
-            "MAQProjectRegister table "
-            "was not found."
-        )
-
-    cells = target_sheet[
-        target_table.ref
-    ]
-
-    headers = [
-        cell.value
-        for cell in cells[0]
-    ]
-
-    projects = []
-
-    for row in cells[1:]:
-
-        values = [
-            cell.value
-            for cell in row
-        ]
-
-        project = dict(
-            zip(
-                headers,
-                values,
-            )
-        )
-
-        for key, value in (
-            project.items()
-        ):
-
-            if hasattr(
-                value,
-                "isoformat",
-            ):
-
-                project[key] = (
-                    value.isoformat()
-                )
-
-        projects.append(
-            project
-        )
-
-    return projects
-
 
 # ---------------------------------------------------------
-# SharePoint debug endpoint
+# Authentication
 # ---------------------------------------------------------
 
-@app.post(
-    "/sharepoint/project-register"
-)
-async def read_project_register(
-    request: DeliveryQueryRequest,
+@app.post("/auth/login")
+async def login(
+    request: LoginRequest,
 ):
 
     try:
 
-        projects = (
-            parse_project_register(
-                request.file_content_base64
-            )
+        session = create_login_session(
+            request.user_id
         )
 
-        return {
-            "success": True,
-            "source": "SharePoint",
-            "user_question":
-                request.user_question,
-            "user_id":
-                request.user_id,
-            "file_name":
-                request.file_name,
-            "table_name":
-                "MAQProjectRegister",
-            "project_count":
-                len(projects),
-            "projects":
-                projects,
-        }
-
-    except Exception as exc:
-
-        print(
-            "[SharePointParser] "
-            f"{type(exc).__name__}: "
-            f"{exc}"
-        )
+    except AuthorizationError:
 
         raise HTTPException(
-            status_code=500,
-            detail=(
-                "The SharePoint project "
-                "register could not be parsed."
-            ),
+            status_code=401,
+            detail="Invalid user_id.",
         )
+
+    return {
+        "session_id": session.session_id,
+        "user_id": session.user_id,
+        "role": session.role,
+    }
+
+
+
+@app.post("/auth/logout")
+async def logout(
+    request: LogoutRequest,
+):
+
+    end_login_session(
+        request.session_id
+    )
+
+    return {
+        "success": True,
+    }
+
 
 
 # ---------------------------------------------------------
-# Main multi-agent delivery endpoint
+# Report / chart serving
+# ---------------------------------------------------------
+
+@app.get("/reports/{report_id}.html")
+async def get_report(
+    report_id: str,
+):
+
+    report_path = (
+        REPORTS_DIR /
+        f"{report_id}.html"
+    )
+
+    if not report_path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Report not found.",
+        )
+
+    return FileResponse(
+        report_path,
+        media_type="text/html",
+        filename=f"MAQ-Delivery-Report-{report_id}.html",
+    )
+
+
+
+@app.get("/reports/{filename}.png")
+async def get_chart(
+    filename: str,
+):
+
+    chart_path = (
+        REPORTS_DIR /
+        f"{filename}.png"
+    )
+
+    if not chart_path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chart not found.",
+        )
+
+    return FileResponse(
+        chart_path,
+        media_type="image/png",
+    )
+
+
+
+# ---------------------------------------------------------
+# Main delivery endpoint
 # ---------------------------------------------------------
 
 @app.post("/delivery/query")
 async def delivery_query(
     request: DeliveryQueryRequest,
 ):
-    """
-    Executes the MAQ three-agent workflow:
-
-    Agent 1:
-        MAQPortfolioEvidenceAgent
-
-    Agent 2:
-        MAQEngineeringEvidenceAgent
-
-    Agent 3:
-        MAQDeliveryAnalystAgent
-
-    Portfolio and Engineering agents execute
-    concurrently. Their evidence is validated
-    and passed to the Analyst Agent.
-    """
 
     try:
 
-        # -------------------------------------------------
-        # Parse live SharePoint project register
-        # -------------------------------------------------
-
-        projects = (
-            parse_project_register(
-                request.file_content_base64
-            )
+        access = resolve_login_session(
+            request.session_id
         )
+
 
         print(
-            "[DeliveryQuery] "
-            f"Loaded {len(projects)} "
-            "SharePoint projects."
+            "[DeliveryQuery] Session resolved for user:",
+            access.user_id,
         )
 
-
-        # -------------------------------------------------
-        # Request-level source tracking
-        # -------------------------------------------------
 
         sources_used = set()
 
+
         source_order = [
-            "SharePoint",
-            "Dataverse",
             "Azure DevOps",
             "MAQ Delivery Knowledge",
         ]
@@ -315,7 +271,7 @@ async def delivery_query(
 
         def mark_source(
             source_name: str,
-        ) -> None:
+        ):
 
             sources_used.add(
                 source_name
@@ -327,19 +283,23 @@ async def delivery_query(
             )
 
 
-        # -------------------------------------------------
-        # PII detection and masking
-        # -------------------------------------------------
+
+        # -----------------------------
+        # PII masking
+        # -----------------------------
 
         pii_result = anonymize_pii(
             request.user_question
         )
 
+
         sanitized_question = (
             pii_result["sanitized_text"]
         )
 
+
         if pii_result["pii_detected"]:
+
             print(
                 "[Security] PII detected and masked:",
                 [
@@ -350,52 +310,62 @@ async def delivery_query(
             )
 
 
-        # -------------------------------------------------
-        # Prompt-injection guard
-        # -------------------------------------------------
+
+        # -----------------------------
+        # Prompt guard
+        # -----------------------------
 
         validate_user_prompt(
             sanitized_question
         )
+
 
         print(
             "[Security] Prompt guard passed."
         )
 
 
-        # -------------------------------------------------
-        # Run 3-agent orchestration
-        # -------------------------------------------------
+
+        # -----------------------------
+        # Run MAF workflow
+        # -----------------------------
 
         print(
             "[DeliveryQuery] Starting "
-            "multi-agent workflow..."
+            "delivery workflow..."
         )
+
 
         workflow_result = (
             await run_delivery_workflow(
-                user_id=request.user_id,
+                user_id=access.user_id,
+                session_id=request.session_id,
                 user_question=sanitized_question,
-                projects=projects,
                 mark_source=mark_source,
             )
         )
+
+
 
         safe_answer, secret_detected = redact_secrets(
             workflow_result["answer"]
         )
 
+
         if secret_detected:
+
             print(
-                "[Security] Secret-like content redacted from output."
+                "[Security] Secret-like content redacted."
             )
+
 
         workflow_result["answer"] = safe_answer
 
 
-        # -------------------------------------------------
-        # Actual evidence sources used
-        # -------------------------------------------------
+
+        # -----------------------------
+        # Source tracking
+        # -----------------------------
 
         actual_sources = [
             source
@@ -403,45 +373,84 @@ async def delivery_query(
             if source in sources_used
         ]
 
+
         print(
-            "[SourceTracking] "
-            "Final sources:",
+            "[SourceTracking] Final sources:",
             actual_sources,
         )
 
 
-        # -------------------------------------------------
-        # Final HTTP response
-        # -------------------------------------------------
+
+        # -----------------------------
+        # Build absolute URLs
+        # -----------------------------
+
+        report_url = None
+
+        if workflow_result.get(
+            "report_url"
+        ):
+
+            report_url = (
+                f"{PUBLIC_URL}"
+                f"{workflow_result['report_url']}"
+            )
+
+
+        chart_urls = {}
+
+        for key, value in workflow_result.get(
+            "chart_urls",
+            {}
+        ).items():
+
+            chart_urls[key] = (
+                f"{PUBLIC_URL}{value}"
+            )
+
+
+
+        # -----------------------------
+        # Final response
+        # -----------------------------
 
         return {
+
             "success": True,
 
+
             "user_id":
-                request.user_id,
+                access.user_id,
+
 
             "question":
                 sanitized_question,
 
+
             "answer":
                 workflow_result["answer"],
+
 
             "sources":
                 actual_sources,
 
+
+            "report_url":
+                report_url,
+
+
+            "chart_urls":
+                chart_urls,
+
+
             "workflow":
-                workflow_result[
-                    "workflow"
-                ],
+                workflow_result["workflow"],
+
         }
 
 
-    except PromptInjectionError as exc:
 
-        print(
-            "[Security] Prompt injection blocked:",
-            str(exc),
-        )
+    except PromptInjectionError:
 
         raise HTTPException(
             status_code=400,
@@ -451,25 +460,38 @@ async def delivery_query(
             ),
         )
 
-    except AuthorizationError as exc:
 
-        print(
-            "[DeliveryQuery] Authorization denied:",
-            str(exc),
+
+    except SessionExpiredError:
+
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Session invalid or expired."
+            ),
         )
+
+
+
+    except AuthorizationError:
 
         raise HTTPException(
             status_code=403,
-            detail="You are not authorized to access the requested delivery information.",
+            detail=(
+                "Not authorized."
+            ),
         )
+
+
 
     except Exception as exc:
 
         print(
-            "[DeliveryQuery] Error: "
-            f"{type(exc).__name__}: "
-            f"{exc}"
+            "[DeliveryQuery] Error:",
+            type(exc).__name__,
+            str(exc),
         )
+
 
         raise HTTPException(
             status_code=500,

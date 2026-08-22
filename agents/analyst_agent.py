@@ -1,3 +1,8 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 
@@ -22,7 +27,10 @@ def create_analyst_agent(
         agent_kwargs["middleware"] = middleware
 
     return Agent(
-        client=OpenAIChatClient(),
+        client=OpenAIChatClient(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model=os.getenv("OPENAI_MODEL", "gpt-4o")
+        ),
         name="MAQDeliveryAnalystAgent",
         instructions=ANALYST_AGENT_INSTRUCTIONS,
         **agent_kwargs,

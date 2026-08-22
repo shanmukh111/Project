@@ -25,5 +25,8 @@ llama-index-retrievers-bm25
 llama-index-vector-stores-chroma
 llama-index-embeddings-huggingface
 
+# Charts / report generation
+matplotlib
+
 # Testing
 pytest

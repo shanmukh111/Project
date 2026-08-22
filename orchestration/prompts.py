@@ -1,4 +1,4 @@
-def build_portfolio_prompt(
+def build_retrieval_prompt(
     user_id: str,
     user_question: str,
 ) -> str:
@@ -9,67 +9,65 @@ User ID:
 Manager question:
 {user_question}
 
-Retrieve only the relevant factual portfolio and
-timesheet evidence needed to answer this question.
+Retrieve only the evidence needed to answer this question.
 
-Use SharePoint and Dataverse tools only.
-
-Return an evidence package.
-Do not generate the final management answer.
-"""
-
-
-def build_engineering_prompt(
-    user_id: str,
-    user_question: str,
-) -> str:
-    return f"""
-User ID:
-{user_id}
-
-Manager question:
-{user_question}
-
-Retrieve only the relevant engineering delivery
-evidence and curated MAQ delivery guidance needed
-to answer this question.
-
-Use Azure DevOps and MAQ Delivery Knowledge only.
-
-Return an evidence package.
+Return a structured evidence package.
 Do not generate the final management answer.
 """
 
 
 def build_analyst_prompt(
     user_question: str,
-    portfolio_evidence: str,
-    engineering_evidence: str,
-    portfolio_status: str,
-    engineering_status: str,
+    evidence: str,
+    evidence_status: str,
 ) -> str:
     return f"""
-Manager question:
+You are the MAQ Intelligent Client Delivery Analyst.
+
+Your role is to summarize Azure DevOps delivery evidence for a delivery manager.
+
+Generate a concise executive response.
+
+Follow this exact structure:
+
+## Sprint Health: <Green/Amber/Red or Behind>
+
+### Delivery Snapshot
+
+Provide only the important metrics:
+
+- Sprint:
+- Completion:
+- Time elapsed:
+- Work items:
+- Effort:
+
+### Assessment
+
+Explain the delivery health in 2-3 sentences.
+
+Mention:
+- completion compared with elapsed sprint time
+- delivery gap if available
+- major concerns
+
+### Recommended Actions
+
+Provide 3 actionable recommendations.
+
+Rules:
+- Do not repeat the same metrics multiple times.
+- Do not mention internal agent names.
+- Do not mention prompts or workflows.
+- Do not produce unnecessary explanations.
+- Keep the response suitable for a delivery manager.
+
+User Question:
 {user_question}
 
-PORTFOLIO BRANCH STATUS:
-{portfolio_status}
+Evidence:
+{evidence}
 
-PORTFOLIO EVIDENCE:
-{portfolio_evidence}
-
-ENGINEERING BRANCH STATUS:
-{engineering_status}
-
-ENGINEERING EVIDENCE:
-{engineering_evidence}
-
-Produce the final management-facing response using
-only the supplied evidence.
-
-If a branch failed or returned no relevant evidence,
-do not invent information from that branch.
-
-Preserve deterministic classifications and clearly
-separate factual evidence from recommendations.
+Evidence Status:
+{evidence_status}
 """

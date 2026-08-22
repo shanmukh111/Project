@@ -1,9 +1,17 @@
 def route_question(
     user_question: str,
+    previous_routing: dict | None = None,
 ) -> dict:
     """
     Deterministically decides which evidence
     branches are relevant to the question.
+
+    previous_routing, when supplied, is the routing decision
+    from the prior turn in the same session. It is used only
+    as a fallback when this question has no recognizable
+    portfolio/engineering signal of its own — for example a
+    follow-up like "is it at risk?" that implicitly continues
+    the prior turn's topic rather than starting a new one.
     """
 
     question = user_question.lower()
@@ -63,8 +71,25 @@ def route_question(
     )
 
     if not use_portfolio and not use_engineering:
-        use_portfolio = True
-        use_engineering = True
+        if previous_routing is not None and (
+            previous_routing.get("portfolio")
+            or previous_routing.get("engineering")
+        ):
+            # Ambiguous follow-up with no domain keyword of its
+            # own: continue whichever domain(s) were active last
+            # turn instead of defaulting to both. This avoids
+            # pulling in an unrelated evidence branch and avoids
+            # tripping authorization for a domain the question
+            # never actually asked about.
+            use_portfolio = bool(
+                previous_routing.get("portfolio", False)
+            )
+            use_engineering = bool(
+                previous_routing.get("engineering", False)
+            )
+        else:
+            use_portfolio = True
+            use_engineering = True
 
     return {
         "portfolio": use_portfolio,

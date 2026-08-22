@@ -70,6 +70,7 @@ async def run_with_single_retry(
                 "text": result.value.model_dump_json(
                     indent=2
                 ),
+                "evidence_dict": result.value.model_dump(),
                 "attempts": 1,
             }
 
@@ -117,6 +118,7 @@ async def run_with_single_retry(
                     "text": result.value.model_dump_json(
                         indent=2
                     ),
+                    "evidence_dict": result.value.model_dump(),
                     "attempts": 2,
                 }
 
@@ -141,5 +143,6 @@ async def run_with_single_retry(
                     f"{branch_name} evidence "
                     "is unavailable for this request."
                 ),
+                "evidence_dict": {},
                 "attempts": 2,
             }

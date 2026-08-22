@@ -1,8 +1,17 @@
 import csv
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 
-DATA_FILE = Path("data/d365/timesheets.csv")
+load_dotenv()
+
+DATA_FILE = Path(
+    os.getenv(
+        "D365_TIMESHEETS_PATH",
+        "data/d365/timesheets.csv",
+    )
+)
 
 
 def get_timesheets(

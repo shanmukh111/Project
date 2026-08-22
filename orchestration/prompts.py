@@ -20,54 +20,39 @@ def build_analyst_prompt(
     user_question: str,
     evidence: str,
     evidence_status: str,
+    sources_used: list[str],
 ) -> str:
+    sources_line = (
+        ", ".join(sources_used)
+        if sources_used
+        else "none"
+    )
+
     return f"""
-You are the MAQ Intelligent Client Delivery Analyst.
-
-Your role is to summarize Azure DevOps delivery evidence for a delivery manager.
-
-Generate a concise executive response.
-
-Follow this exact structure:
-
-## Sprint Health: <Green/Amber/Red or Behind>
-
-### Delivery Snapshot
-
-Provide only the important metrics:
-
-- Sprint:
-- Completion:
-- Time elapsed:
-- Work items:
-- Effort:
-
-### Assessment
-
-Explain the delivery health in 2-3 sentences.
-
-Mention:
-- completion compared with elapsed sprint time
-- delivery gap if available
-- major concerns
-
-### Recommended Actions
-
-Provide 3 actionable recommendations.
-
-Rules:
-- Do not repeat the same metrics multiple times.
-- Do not mention internal agent names.
-- Do not mention prompts or workflows.
-- Do not produce unnecessary explanations.
-- Keep the response suitable for a delivery manager.
-
-User Question:
+Manager question:
 {user_question}
 
-Evidence:
+SOURCES CONSULTED FOR THIS QUESTION: {sources_line}
+
+This is the complete list. Do not mention, reference, or
+recommend connecting/updating/checking any source that is not
+in this list (including Azure DevOps, SharePoint, or Timesheets)
+- not as a fact, not as a limitation, not as a recommendation.
+If a source isn't listed above, treat it as if it doesn't exist
+for this question. Write your answer using only what these
+sources actually returned.
+
+EVIDENCE STATUS:
+{evidence_status}
+
+EVIDENCE:
 {evidence}
 
-Evidence Status:
-{evidence_status}
+Produce the final management-facing response using
+only the supplied evidence.
+
+If the evidence is unavailable, do not invent information.
+
+Preserve deterministic classifications and clearly
+separate factual evidence from recommendations.
 """

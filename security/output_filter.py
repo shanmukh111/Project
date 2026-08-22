@@ -63,3 +63,80 @@ def redact_secrets(
         sanitized = updated
 
     return sanitized, detected
+
+
+# ---------------------------------------------------------
+# Out-of-scope source mention filtering
+#
+# Prompt instructions alone did not reliably stop the model from
+# mentioning sources that were never queried for a given question
+# (e.g. "Work items: Not provided in the returned evidence" or
+# "Ensure Azure DevOps boards are up to date" on a SharePoint-only
+# answer). This deterministically strips any line referencing a
+# source not in sources_used, the same way secret redaction is
+# handled in code rather than left to instruction-following.
+# ---------------------------------------------------------
+
+_SOURCE_TERMS = {
+    "Azure DevOps": [
+        "azure devops",
+        "work item",
+        "work-item",
+        "sprint",
+        "devops board",
+        "elapsed time",
+        "elapsed-time",
+    ],
+    "SharePoint": [
+        "sharepoint",
+        "project register",
+    ],
+    "Timesheets": [
+        "timesheet",
+        "d365",
+    ],
+}
+
+
+def filter_out_of_scope_sources(
+    text: str,
+    sources_used: list[str],
+) -> tuple[str, bool]:
+    """
+    Removes any line that references a data source not actually
+    used to answer this question (e.g. a stray "no Azure DevOps
+    data was returned" line on a SharePoint-only answer).
+
+    Returns:
+        (filtered_text, line_removed)
+    """
+
+    if not text:
+        return text, False
+
+    forbidden_terms = []
+
+    for source, terms in _SOURCE_TERMS.items():
+        if source not in sources_used:
+            forbidden_terms.extend(terms)
+
+    if not forbidden_terms:
+        return text, False
+
+    lines = text.split("\n")
+    kept_lines = []
+    removed = False
+
+    for line in lines:
+        lower_line = line.lower()
+
+        if any(
+            term in lower_line
+            for term in forbidden_terms
+        ):
+            removed = True
+            continue
+
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines), removed

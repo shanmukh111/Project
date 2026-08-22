@@ -2,7 +2,7 @@ import pytest
 
 from orchestration.routing import route_question
 from security.authorization import (
-    authorize_route,
+    authorize_email,
     AuthorizationError,
 )
 from security.prompt_guard import (
@@ -11,6 +11,12 @@ from security.prompt_guard import (
 )
 from security.output_filter import redact_secrets
 
+
+# NOTE: route_question() is currently unused by the live pipeline -
+# tool selection is now the Data Retrieval Agent's own reasoning,
+# not deterministic pre-routing. These tests just confirm the
+# (unused) function itself still behaves correctly, in case it's
+# reintroduced as a guardrail later.
 
 def test_sprint_question_routes_to_engineering_only():
     result = route_question(
@@ -39,33 +45,32 @@ def test_cross_domain_question_routes_to_both():
     assert result["engineering"] is True
 
 
-def test_manager_authorized_for_engineering():
-    routing = {
-        "portfolio": False,
-        "engineering": True,
-        "guidance": False,
-    }
-
-    access = authorize_route(
-        user_id="manager01",
-        routing=routing,
+def test_authorized_email_succeeds():
+    access = authorize_email(
+        "shanmukha.regidi@maqsoftware.com"
     )
 
-    assert access.user_id == "manager01"
+    assert access.email == "shanmukha.regidi@maqsoftware.com"
 
 
-def test_engineering_user_denied_portfolio_access():
-    routing = {
-        "portfolio": True,
-        "engineering": False,
-        "guidance": False,
-    }
+def test_authorized_email_is_case_insensitive():
+    access = authorize_email(
+        "Shanmukha.Regidi@MAQSoftware.com"
+    )
 
+    assert access.email == "shanmukha.regidi@maqsoftware.com"
+
+
+def test_unauthorized_email_denied():
     with pytest.raises(AuthorizationError):
-        authorize_route(
-            user_id="engineering01",
-            routing=routing,
+        authorize_email(
+            "not.on.the.list@maqsoftware.com"
         )
+
+
+def test_empty_email_denied():
+    with pytest.raises(AuthorizationError):
+        authorize_email("")
 
 
 def test_normal_prompt_is_allowed():

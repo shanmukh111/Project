@@ -33,11 +33,19 @@ from agents.engineering_tools import (
     build_engineering_tools,
 )
 
+from agents.analyst_tools import (
+    build_analyst_tools,
+)
+
 from reporting.charts import (
     build_effort_bar_chart,
     build_html_report,
     build_status_pie_chart,
     save_chart_png,
+)
+
+from security.output_filter import (
+    filter_out_of_scope_sources,
 )
 
 
@@ -105,22 +113,26 @@ async def run_delivery_workflow(
     session_id: str | None,
     user_question: str,
     mark_source,
+    sources_used: set,
+    project_register: list[dict] | None = None,
 ) -> dict:
     """
     Executes the MAQ two-agent delivery workflow.
 
     Flow:
 
-        Data Retrieval Agent (free tool selection over all
-        Azure DevOps tools + Hybrid RAG - no deterministic
-        pre-routing; the agent reasons about which tool(s)
-        the question needs, per its few-shot instructions)
+        Data Retrieval Agent (free tool selection over Azure
+        DevOps, SharePoint, and D365 Timesheets - no deterministic
+        pre-routing; the agent reasons about which source(s) the
+        question needs, per its few-shot instructions, and can
+        call more than one in the same turn)
                 |
                 v
         validation / retry
                 |
                 v
-        Insight Orchestrator (reasoning + narrative answer)
+        Insight Orchestrator (reasoning + narrative answer,
+        with its own Hybrid RAG tool for guidance/recommendations)
                 |
                 v
         Chart + HTML report generation (deterministic,
@@ -131,11 +143,9 @@ async def run_delivery_workflow(
     # -----------------------------------------------------
     # Authorization
     #
-    # There is only one evidence domain now (Azure DevOps), so
-    # authorization simplifies to "is this a known, currently
-    # logged-in user" - already established by resolve_login_session
-    # before this function is called. No per-domain routing check
-    # is needed here anymore.
+    # Authorization is a flat email allowlist check done before
+    # this function is called (security.authorization.authorize_email).
+    # No per-domain routing check is needed here.
     # -----------------------------------------------------
 
     print(
@@ -147,15 +157,18 @@ async def run_delivery_workflow(
     # -----------------------------------------------------
     # Request-scoped tools
     #
-    # Hybrid RAG is always available now - the retrieval agent
-    # decides for itself whether a question needs guidance,
-    # per its few-shot instructions, rather than a deterministic
-    # "guidance" flag gating it.
+    # SharePoint uses project_register data already fetched by
+    # the calling flow. Timesheets reads a local CSV. Azure
+    # DevOps MCP is set up separately below (a running process,
+    # not a plain function). The retrieval agent decides for
+    # itself which of these a question actually needs, per its
+    # few-shot instructions.
     # -----------------------------------------------------
 
     retrieval_tools = (
         build_engineering_tools(
             mark_source=mark_source,
+            project_register=project_register,
         )
     )
 
@@ -256,9 +269,9 @@ async def run_delivery_workflow(
             async def run_retrieval():
                 """
                 Single evidence-gathering branch. The agent
-                freely chooses among every Azure DevOps tool and
-                Hybrid RAG, per its few-shot instructions - there
-                is no deterministic pre-routing step anymore.
+                freely chooses among Azure DevOps, SharePoint,
+                and Timesheets, per its few-shot instructions -
+                there is no deterministic pre-routing step.
                 """
 
                 prompt = build_retrieval_prompt(
@@ -326,6 +339,7 @@ async def run_delivery_workflow(
             user_question=user_question,
             evidence=retrieval_result["text"],
             evidence_status=retrieval_status,
+            sources_used=sorted(sources_used),
         )
     )
 
@@ -334,19 +348,39 @@ async def run_delivery_workflow(
         "Insight Orchestrator..."
     )
 
+    analyst_tools = (
+        build_analyst_tools(
+            mark_source=mark_source,
+        )
+    )
+
     async with (
         create_analyst_agent()
     ) as analyst_agent:
 
         analyst_response = (
             await analyst_agent.run(
-                analyst_prompt
+                analyst_prompt,
+                tools=analyst_tools,
             )
         )
 
     print(
         "[Workflow] Insight Orchestrator complete."
     )
+
+    filtered_answer, lines_removed = (
+        filter_out_of_scope_sources(
+            analyst_response.text,
+            sorted(sources_used),
+        )
+    )
+
+    if lines_removed:
+        print(
+            "[Workflow] Removed out-of-scope "
+            "source reference(s) from the answer."
+        )
 
 
     # -----------------------------------------------------
@@ -378,10 +412,10 @@ async def run_delivery_workflow(
 
     build_html_report(
         question=user_question,
-        answer=analyst_response.text,
+        answer=filtered_answer,
         chart_pie_b64=chart_pie_b64,
         chart_bar_b64=chart_bar_b64,
-        sources=[],  # filled in by the API layer, which tracks mark_source calls
+        sources=sorted(sources_used),
         report_id=report_id,
     )
 
@@ -397,13 +431,13 @@ async def run_delivery_workflow(
 
     return {
         "success": True,
-        "answer": analyst_response.text,
+        "answer": filtered_answer,
         "report_id": report_id,
         "report_url": f"/reports/{report_id}.html",
         "chart_urls": chart_urls,
 
         "workflow": {
-            "strategy": "single-agent-retrieval",
+            "strategy": "three-source-retrieval",
             "retrieval_agent": {
                 "status": retrieval_status,
                 "attempts": retrieval_result["attempts"],

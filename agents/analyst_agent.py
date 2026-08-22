@@ -15,10 +15,13 @@ def create_analyst_agent(
     middleware=None,
 ):
     """
-    Creates the MAQ Delivery Analyst Agent.
+    Creates the MAQ Delivery Analyst Agent (Insight Orchestrator).
 
-    This agent should not receive live data-source tools.
-    It only analyzes validated evidence passed by the workflow.
+    This agent should not receive live data-source tools (Azure
+    DevOps, SharePoint, Timesheets) - it only analyzes validated
+    evidence passed by the workflow. It does receive its own
+    Hybrid RAG tool at .run() time (see analyst_tools.py), for
+    guidance/interpretation content, not live facts.
     """
 
     agent_kwargs = {}

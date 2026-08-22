@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -16,10 +17,7 @@ from pydantic import BaseModel
 
 from security.authorization import (
     AuthorizationError,
-    SessionExpiredError,
-    create_login_session,
-    end_login_session,
-    resolve_login_session,
+    authorize_email,
 )
 
 from security.pii_filter import anonymize_pii
@@ -51,6 +49,52 @@ PUBLIC_URL = os.getenv(
     "PUBLIC_URL",
     "https://bmvxdh1s-8000.asse.devtunnels.ms"
 )
+
+
+# ---------------------------------------------------------
+# Request deduplication
+#
+# Copilot Studio's generative orchestrator has been observed
+# calling this tool multiple times for a single user message
+# (confirmed via distinct report_ids in the backend logs for
+# what was clearly one question). Since that's a platform
+# behavior outside this backend's control, the fix is here:
+# if the same user asks the same question again within a short
+# window, return the already-computed response instead of
+# re-running the full agent pipeline. Real follow-up questions
+# (different text) are unaffected.
+# ---------------------------------------------------------
+
+_DEDUPE_WINDOW_SECONDS = 30
+_DEDUPE_CACHE_MAX_AGE_SECONDS = 300  # prune anything older than this
+
+_recent_responses: dict[
+    tuple[str, str],
+    tuple[dict, float],
+] = {}
+
+
+def _normalize_for_dedupe(
+    text: str,
+) -> str:
+
+    return " ".join(
+        text.strip().lower().split()
+    )
+
+
+def _prune_dedupe_cache() -> None:
+
+    now = time.time()
+
+    stale_keys = [
+        key
+        for key, (_, timestamp) in _recent_responses.items()
+        if now - timestamp > _DEDUPE_CACHE_MAX_AGE_SECONDS
+    ]
+
+    for key in stale_keys:
+        del _recent_responses[key]
 
 
 # ---------------------------------------------------------
@@ -96,6 +140,12 @@ app = FastAPI(
 
 # ---------------------------------------------------------
 # Request models
+#
+# user_id here is expected to be the caller's real email
+# (Copilot Studio's User.Email), checked against the
+# allowlist in security.authorization on every request.
+# There is no separate login/session step anymore - the
+# email itself doubles as the key for conversational memory.
 # ---------------------------------------------------------
 
 class DeliveryQueryRequest(
@@ -103,18 +153,8 @@ class DeliveryQueryRequest(
 ):
 
     user_question: str
-    session_id: str
-
-
-class LoginRequest(BaseModel):
-
     user_id: str
-
-
-class LogoutRequest(BaseModel):
-
-    session_id: str
-
+    project_register: list[dict] | None = None
 
 
 # ---------------------------------------------------------
@@ -137,52 +177,6 @@ async def health():
         ),
         "agents": 2,
     }
-
-
-
-# ---------------------------------------------------------
-# Authentication
-# ---------------------------------------------------------
-
-@app.post("/auth/login")
-async def login(
-    request: LoginRequest,
-):
-
-    try:
-
-        session = create_login_session(
-            request.user_id
-        )
-
-    except AuthorizationError:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid user_id.",
-        )
-
-    return {
-        "session_id": session.session_id,
-        "user_id": session.user_id,
-        "role": session.role,
-    }
-
-
-
-@app.post("/auth/logout")
-async def logout(
-    request: LogoutRequest,
-):
-
-    end_login_session(
-        request.session_id
-    )
-
-    return {
-        "success": True,
-    }
-
 
 
 # ---------------------------------------------------------
@@ -247,16 +241,45 @@ async def delivery_query(
     request: DeliveryQueryRequest,
 ):
 
+    _prune_dedupe_cache()
+
+    dedupe_key = (
+        request.user_id.strip().lower(),
+        _normalize_for_dedupe(
+            request.user_question
+        ),
+    )
+
+    now = time.time()
+
+    cached = _recent_responses.get(dedupe_key)
+
+    if cached:
+        cached_response, cached_at = cached
+
+        if now - cached_at < _DEDUPE_WINDOW_SECONDS:
+            print(
+                "[DeliveryQuery] Duplicate request "
+                f"within {_DEDUPE_WINDOW_SECONDS}s - "
+                "returning cached response instead of "
+                "re-running the workflow."
+            )
+
+            return cached_response
+
     try:
 
-        access = resolve_login_session(
-            request.session_id
+        # -----------------------------
+        # Authorization by email
+        # -----------------------------
+
+        access = authorize_email(
+            request.user_id
         )
 
-
         print(
-            "[DeliveryQuery] Session resolved for user:",
-            access.user_id,
+            "[DeliveryQuery] Authorized:",
+            access.email,
         )
 
 
@@ -264,7 +287,9 @@ async def delivery_query(
 
 
         source_order = [
+            "SharePoint",
             "Azure DevOps",
+            "Timesheets",
             "MAQ Delivery Knowledge",
         ]
 
@@ -328,6 +353,10 @@ async def delivery_query(
 
         # -----------------------------
         # Run MAF workflow
+        #
+        # session_id is the authorized email itself - a
+        # stable per-person key for conversational memory,
+        # with no separate login/session issuance needed.
         # -----------------------------
 
         print(
@@ -338,10 +367,12 @@ async def delivery_query(
 
         workflow_result = (
             await run_delivery_workflow(
-                user_id=access.user_id,
-                session_id=request.session_id,
+                user_id=access.email,
+                session_id=access.email,
                 user_question=sanitized_question,
                 mark_source=mark_source,
+                sources_used=sources_used,
+                project_register=request.project_register,
             )
         )
 
@@ -414,13 +445,13 @@ async def delivery_query(
         # Final response
         # -----------------------------
 
-        return {
+        response_body = {
 
             "success": True,
 
 
             "user_id":
-                access.user_id,
+                access.email,
 
 
             "question":
@@ -448,6 +479,13 @@ async def delivery_query(
 
         }
 
+        _recent_responses[dedupe_key] = (
+            response_body,
+            time.time(),
+        )
+
+        return response_body
+
 
 
     except PromptInjectionError:
@@ -462,23 +500,18 @@ async def delivery_query(
 
 
 
-    except SessionExpiredError:
+    except AuthorizationError as exc:
 
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "Session invalid or expired."
-            ),
+        print(
+            "[DeliveryQuery] Authorization denied:",
+            str(exc),
         )
-
-
-
-    except AuthorizationError:
 
         raise HTTPException(
             status_code=403,
             detail=(
-                "Not authorized."
+                "You are not authorized "
+                "to use this agent."
             ),
         )
 

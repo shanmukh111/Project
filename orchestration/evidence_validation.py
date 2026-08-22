@@ -68,7 +68,8 @@ async def run_with_single_retry(
                 "success": True,
                 "status": "success",
                 "text": result.value.model_dump_json(
-                    indent=2
+                    indent=2,
+                    exclude_none=True,
                 ),
                 "evidence_dict": result.value.model_dump(),
                 "attempts": 1,
@@ -116,7 +117,8 @@ async def run_with_single_retry(
                         "success_after_retry"
                     ),
                     "text": result.value.model_dump_json(
-                        indent=2
+                        indent=2,
+                        exclude_none=True,
                     ),
                     "evidence_dict": result.value.model_dump(),
                     "attempts": 2,

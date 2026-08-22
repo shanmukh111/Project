@@ -1,14 +1,12 @@
 # MAQ Intelligent Client Delivery Agent
 
-An enterprise-style, multi-agent delivery intelligence solution built for MAQ Software using Microsoft Agent Framework (MAF), FastAPI, Azure DevOps MCP, Dataverse, SharePoint, Hybrid RAG, and Microsoft Copilot Studio.
+An enterprise-style, multi-agent delivery intelligence solution built for MAQ Software using Microsoft Agent Framework (MAF), FastAPI, Azure DevOps MCP, SharePoint, D365 Project Operations timesheets, Hybrid RAG, and Microsoft Copilot Studio.
 
-The solution helps delivery managers ask natural-language questions about project health, sprint delivery, utilization, risks, and recommended actions. It routes each request to specialized agents, gathers grounded evidence from enterprise sources, validates the evidence, and produces a concise management response.
+The solution helps delivery managers ask natural-language questions about project health, sprint delivery, utilization, risks, and recommended actions. A single retrieval agent gathers grounded evidence from up to three enterprise sources based on what the question actually needs, an orchestrator agent synthesizes a management-facing answer, and the backend deterministically generates supporting charts and a downloadable report.
 
 ---
 
 ## Solution Overview
-
-The system uses a three-agent architecture:
 
 ```text
 User / Copilot Studio
@@ -18,71 +16,78 @@ FastAPI Orchestrator
         |
         +--> PII Masking
         +--> Prompt Injection Guard
-        +--> Authorization
-        +--> Deterministic Routing
+        +--> Authorization (email allowlist)
         |
-        +-------------------------------+
-        |                               |
-        v                               v
-MAQPortfolioEvidenceAgent      MAQEngineeringEvidenceAgent
-SharePoint + Dataverse         Azure DevOps MCP + Hybrid RAG
-        |                               |
-        +---------------+---------------+
+        v
+   MAQDataRetrievalAgent
+        |
+        +-------------+-------------+
+        |             |             |
+        v             v             v
+  SharePoint     Azure DevOps   Timesheet
+    Tool             Tool          Tool
+  (project        (live sprint   (local D365
+   register,        + work        CSV export)
+   flow-supplied)    items)
+        |             |             |
+        +-------------+-------------+
                         |
                         v
-                 Evidence Validation
-                  Retry / Fallback
+                Evidence Validation
+                 Retry / Fallback
                         |
                         v
-              MAQDeliveryAnalystAgent
-                        |
+              MAQDeliveryAnalystAgent  <---  Hybrid RAG
+                        |                (Knowledge Base,
+                        |                 called only if the
+                        |                 question needs guidance)
                         v
                Grounded Final Answer
                         |
                         v
               Output Secret Redaction
+                        |
+                        v
+        Deterministic Chart + Report
+           Generation (matplotlib)
 ```
 
 ### Agent Responsibilities
 
-**MAQPortfolioEvidenceAgent**
-- Retrieves business and project delivery evidence.
-- Uses SharePoint project-register data.
-- Uses Dataverse time-entry and utilization evidence.
-- Returns structured portfolio evidence.
-- Does not create the final management recommendation.
+**MAQDataRetrievalAgent**
+- The only evidence-gathering agent. Chooses which of the three tools below a question needs - there is no deterministic pre-routing step; tool selection is the agent's own reasoning, guided by few-shot instructions.
+- **SharePoint tool** - reads the project register rows the Copilot Studio flow already fetched from an Excel table in SharePoint and passed in with the request. Does not make a live SharePoint call itself.
+- **Azure DevOps tool (MCP)** - live sprint summary, named-iteration lookup, active work items, project info, iteration dates. Includes effort hours (planned/completed/remaining) alongside work-item counts.
+- **Timesheet tool** - reads a local D365 Project Operations timesheet export (CSV) for planned vs. actual vs. billable hours, approval status, and utilization.
+- Can call more than one tool in the same turn when a question genuinely spans sources.
+- Never generates the final answer or any recommendation - that's the Analyst's job.
+- Transcribes deterministic Azure DevOps numbers (completion %, sprint-elapsed %, health status) exactly as returned - never recalculates them.
 
-**MAQEngineeringEvidenceAgent**
-- Retrieves engineering delivery evidence.
-- Uses Azure DevOps through MCP.
-- Uses Hybrid RAG when guidance or recommendations are requested.
-- Preserves deterministic sprint-health calculations.
-- Returns structured engineering evidence.
-
-**MAQDeliveryAnalystAgent**
-- Receives validated evidence from the Portfolio and Engineering agents.
-- Does not directly call enterprise data sources.
-- Synthesizes the final management-facing answer.
-- Avoids unsupported causal claims across domains.
+**MAQDeliveryAnalystAgent (Insight Orchestrator)**
+- Receives validated evidence from the Data Retrieval Agent. Has no direct access to live data sources.
+- Has its own tool: Hybrid RAG (`search_delivery_knowledge`) over curated delivery guidance - used only when the question asks for interpretation or recommendations, not for facts.
+- Synthesizes the final management-facing answer: factual evidence, interpretation, and (only when supported) recommendations.
+- Never overrides a deterministic classification supplied in the evidence.
 
 ---
 
 ## Key Capabilities
 
-- Multi-agent orchestration with Microsoft Agent Framework
-- Conditional routing between portfolio and engineering domains
-- Parallel execution for cross-domain queries
-- Structured evidence with Pydantic models
-- Azure DevOps integration through FastMCP
-- SharePoint project-register ingestion
-- Dataverse time-entry analysis
-- Hybrid RAG using semantic search + BM25 + reciprocal-rank fusion
-- Role-based authorization
+- Two-agent orchestration with Microsoft Agent Framework
+- Agent-driven (not deterministic) tool selection across three evidence sources, with multi-tool calls in a single turn where relevant
+- Structured evidence with Pydantic models, including numeric fields the backend uses to render charts deterministically
+- Azure DevOps integration through FastMCP, including per-work-item effort tracking (Original Estimate / Completed Work / Remaining Work)
+- SharePoint project-register ingestion via the Copilot Studio flow (no live SharePoint call from the backend)
+- D365 Project Operations timesheet analysis from a local CSV export
+- Hybrid RAG using semantic search + BM25, available to the Analyst agent for guidance and recommendations
+- Email-allowlist authorization (Teams SSO identity via Copilot Studio's `User.Email`, not a self-declared identity string)
 - PII detection and masking with Microsoft Presidio
 - Prompt-injection protection
 - Output secret redaction
 - Evidence validation with retry and graceful fallback
 - Source tracking for grounded responses
+- Deterministic chart generation (work-item status pie chart, effort bar chart) and a self-contained HTML report, served back to Copilot Studio as absolute URLs
+- Per-user conversational memory (MAF `AgentSession`/`SessionStore`), keyed on the authorized email
 - Copilot Studio integration for Microsoft Teams-facing interaction
 
 ---
@@ -95,10 +100,12 @@ SharePoint + Dataverse         Azure DevOps MCP + Hybrid RAG
 | API layer | FastAPI |
 | Agent model client | OpenAI client through Agent Framework |
 | MCP | FastMCP |
-| Engineering data | Azure DevOps |
-| Portfolio data | SharePoint + Dataverse |
+| Engineering data | Azure DevOps (live REST API via MCP) |
+| Portfolio data | SharePoint (Excel table, fetched by the Copilot Studio flow) |
+| Timesheet data | D365 Project Operations export (local CSV) |
 | Retrieval | LlamaIndex + ChromaDB + BM25 |
 | Embeddings | sentence-transformers/all-MiniLM-L6-v2 |
+| Charts / reports | matplotlib |
 | PII protection | Microsoft Presidio |
 | Validation | Pydantic |
 | Front-end / user interaction | Microsoft Copilot Studio |
@@ -114,28 +121,22 @@ maq-client-delivery-agent/
 ├── agents/
 │   ├── analyst_agent.py
 │   ├── analyst_instructions.py
+│   ├── analyst_tools.py          <- Hybrid RAG tool (Analyst's only tool)
 │   ├── engineering_agent.py
 │   ├── engineering_instructions.py
-│   ├── engineering_tools.py
-│   ├── portfolio_agent.py
-│   ├── portfolio_instructions.py
-│   ├── portfolio_tools.py
-│   ├── project_tools.py
-│   └── retrieval_agent.py
+│   └── engineering_tools.py      <- SharePoint + Timesheet tools
 │
 ├── apps/
 │   └── api/
 │       └── main.py
 │
 ├── connectors/
-│   ├── d365_timesheet.py
-│   ├── dataverse_timeentry.py
-│   └── sharepoint_export.py
+│   └── d365_timesheet.py         <- local CSV reader, path via D365_TIMESHEETS_PATH
 │
 ├── data/
-│   ├── d365/
-│   ├── knowledge/
-│   └── sharepoint/
+│   ├── d365/                     <- fallback/sample timesheet CSV
+│   ├── knowledge/                <- Hybrid RAG source documents
+│   └── sharepoint/                <- fallback/sample project register CSV
 │
 ├── mcp_server/
 │   └── devops_server.py
@@ -145,24 +146,30 @@ maq-client-delivery-agent/
 │   ├── evidence_models.py
 │   ├── evidence_validation.py
 │   ├── prompts.py
-│   └── routing.py
+│   └── routing.py                <- currently unused; see note below
+│
+├── reporting/
+│   └── charts.py                 <- deterministic chart + HTML report generation
 │
 ├── retrieval/
-│   ├── hybrid_rag.py
-│   └── project_evidence.py
+│   └── hybrid_rag.py
 │
 ├── security/
-│   ├── authorization.py
+│   ├── authorization.py          <- flat email allowlist
 │   ├── output_filter.py
 │   ├── pii_filter.py
 │   └── prompt_guard.py
 │
+├── reports/                       <- generated at runtime, gitignored
 ├── tests/
-├── pipelines/
 ├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
+
+> **Note on `orchestration/routing.py`:** an earlier version of this project used deterministic keyword routing to decide which evidence branch(es) ran. That has been replaced by the Data Retrieval Agent's own tool-selection reasoning (see Agent Responsibilities above). The file is left in place, unused, in case deterministic pre-filtering is reintroduced later as a cost/latency guardrail.
+
+> **Note on `connectors/dataverse_timeentry.py` and `connectors/sharepoint_export.py`:** earlier versions of this project queried Dataverse live via an authenticated PowerShell session, and read a local SharePoint CSV directly. Both have been superseded - SharePoint data now arrives from the Copilot Studio flow already fetched, and timesheet data comes from a local D365 CSV export instead of live Dataverse. These connector files may still exist in the repository but are not part of the live request path.
 
 ---
 
@@ -172,9 +179,7 @@ maq-client-delivery-agent/
 - Git
 - Azure DevOps access
 - Azure DevOps Personal Access Token for local development
-- Dataverse access
-- Microsoft Copilot Studio access
-- PowerShell
+- Microsoft Copilot Studio access, with a SharePoint connector configured for the project register
 - Microsoft Dev Tunnel for local Copilot Studio integration
 
 > Secrets must never be committed to Git. Store local credentials only in `.env`.
@@ -221,9 +226,9 @@ APP_ENV=dev
 OPENAI_API_KEY=<openai-api-key>
 OPENAI_CHAT_MODEL=<model-name>
 
-DATAVERSE_URL=<dataverse-environment-url>
-DATAVERSE_API_VERSION=v9.2
-DATAVERSE_ENTITY_SET=<dataverse-entity-set>
+D365_TIMESHEETS_PATH=<path-to-local-timesheets-csv>
+
+PUBLIC_URL=<your-devtunnel-base-url>
 ```
 
 Do not commit `.env`.
@@ -250,65 +255,69 @@ Primary delivery endpoint:
 POST /delivery/query
 ```
 
+Request body:
+
+```json
+{
+  "user_question": "What is the current sprint status?",
+  "user_id": "shanmukha.regidi@maqsoftware.com",
+  "project_register": [ { "Project ID": "PBI-001", "...": "..." } ]
+}
+```
+
+`user_id` is the caller's email, checked against the allowlist in `security/authorization.py` on every request - there is no separate login/session-issuance step. `project_register` is optional; omit it and the SharePoint tool will report no data was supplied for that request.
+
+Report and chart retrieval:
+
+```text
+GET /reports/{report_id}.html
+GET /reports/{filename}.png
+```
+
 ---
 
 ## Example Questions
 
-### Engineering-only
+### Azure DevOps only
 
 ```text
-What is the health of the current sprint?
+How many bugs are there right now?
 ```
 
-Expected routing:
+The Data Retrieval Agent calls `get_active_work_items` only - SharePoint and Timesheets have nothing relevant to add.
 
-```python
-{
-    "portfolio": False,
-    "engineering": True,
-    "guidance": False
-}
-```
-
-### Portfolio-only
+### SharePoint only
 
 ```text
-What is the health of our active Power BI projects?
+What is the overall health of the finance project?
 ```
 
-Expected routing:
+The Data Retrieval Agent calls `get_sharepoint_projects` only - this is project-level status, not sprint detail.
 
-```python
-{
-    "portfolio": True,
-    "engineering": False,
-    "guidance": False
-}
-```
-
-### Cross-domain
+### Cross-source
 
 ```text
-Are our risky Power BI projects also showing sprint pressure, and what actions should we prioritize?
+Give me the full picture on the finance project - budget, schedule,
+and whether the team is over on planned hours.
 ```
 
-Expected routing:
+The Data Retrieval Agent calls `get_sharepoint_projects` and `get_timesheets` together in the same turn.
 
-```python
-{
-    "portfolio": True,
-    "engineering": True,
-    "guidance": True
-}
+### Guidance / recommendation
+
+```text
+What should we do about our delivery risks?
 ```
+
+The Data Retrieval Agent gathers the relevant facts (e.g. `get_current_sprint_summary`). The Analyst Agent then calls its own `search_delivery_knowledge` tool to ground a recommendation in curated guidance, rather than generating advice from general knowledge.
 
 ---
 
 ## Deterministic Sprint Health
 
-Sprint health is calculated deterministically from Azure DevOps evidence.
+Sprint health is calculated deterministically inside `mcp_server/devops_server.py` from Azure DevOps evidence (completion % vs. sprint-elapsed %).
 
-The LLM is not allowed to override the calculated classification.
+The LLM is not allowed to override the calculated classification - both agents' instructions explicitly forbid recalculating or overriding `healthStatus`, `completionPercent`, or `sprintElapsedPercent`.
 
 Example categories:
 
@@ -326,7 +335,6 @@ The knowledge layer combines:
 
 - Semantic vector retrieval with ChromaDB
 - BM25 keyword retrieval
-- Reciprocal-rank fusion
 - LlamaIndex orchestration
 - Hugging Face sentence-transformer embeddings
 
@@ -336,7 +344,19 @@ Knowledge documents are stored under:
 data/knowledge/
 ```
 
-Hybrid RAG is used only when guidance or recommendations are required.
+Hybrid RAG is exposed as a tool to the **Analyst Agent**, not the Data Retrieval Agent - it returns guidance/interpretation content, not a live fact, so it belongs with the agent responsible for producing recommendations rather than the agent responsible for gathering facts.
+
+---
+
+## Chart and Report Generation
+
+`reporting/charts.py` builds two charts and one HTML report **deterministically from the Data Retrieval Agent's structured numeric output** - never from the LLM's own generated text:
+
+- A pie chart of work-item status (Completed / In Progress / New), when the evidence includes those counts.
+- A bar chart of planned / completed / remaining effort hours, when the evidence includes those numbers.
+- A self-contained HTML report combining the final answer text with both charts embedded as base64 images.
+
+`apps/api/main.py` serves the generated files back and builds absolute URLs using the `PUBLIC_URL` environment variable, since the backend has no way to know its own public devtunnel address otherwise.
 
 ---
 
@@ -344,11 +364,9 @@ Hybrid RAG is used only when guidance or recommendations are required.
 
 ### Authorization
 
-A deterministic authorization layer validates whether a user is allowed to access:
+`security/authorization.py` checks the caller's email against a flat allowlist (`AUTHORIZED_EMAILS`). There are no differentiated roles currently - any allowlisted email gets full access, since a single retrieval agent now covers all three evidence sources rather than a role-partitioned Portfolio/Engineering split.
 
-- Portfolio evidence
-- Engineering evidence
-- Timesheet / utilization evidence
+The authorized email is also used as the key for conversational memory (MAF `AgentSession`), so a person who asks several questions in the same Teams conversation gets continuity between them without a separate login step.
 
 ### PII Protection
 
@@ -362,10 +380,6 @@ High-confidence prompt-injection and policy-bypass patterns are blocked before a
 
 Final model output is scanned before being returned by FastAPI. Secret-like values such as API keys, bearer tokens, JWTs, passwords, and PAT-style assignments are redacted.
 
-### Source Isolation
-
-The Analyst Agent is instructed not to infer causal relationships between portfolio and engineering evidence unless an explicit mapping exists.
-
 ---
 
 ## Azure DevOps MCP
@@ -376,52 +390,39 @@ The MCP server is implemented in:
 mcp_server/devops_server.py
 ```
 
-Available engineering functions include:
+Available engineering functions:
 
 ```text
 get_project_info
 get_active_work_items
 get_iterations
 get_current_sprint_summary
+get_sprint_summary_by_name
 ```
 
-The Engineering Agent uses these tools to obtain grounded Azure DevOps delivery evidence.
+`get_current_sprint_summary` and `get_sprint_summary_by_name` also return per-work-item and aggregate effort hours (Original Estimate / Completed Work / Remaining Work), used for the effort bar chart. `get_sprint_summary_by_name` accepts flexible sprint references ("Sprint 3", "Iteration 3", "3") and falls back to a number-based match with an ambiguity guard rather than guessing.
 
-The current implementation also prevents repeated use of the same Azure DevOps function during a single Engineering Agent run.
+The current implementation also prevents repeated use of the same Azure DevOps function during a single Data Retrieval Agent run.
 
-> The current Agent Framework API used for progressive tool removal is marked experimental. This should be reviewed when upgrading Agent Framework versions.
-
----
-
-## Dataverse Integration
-
-Dataverse provides delivery evidence such as:
-
-- Planned hours
-- Actual hours
-- Billable hours
-- Variance
-- Utilization
-- Approval status
-- High-risk time entries
-
-Local development authentication is handled outside source control. Tokens and credentials are never stored in the repository.
+> The current Agent Framework API used for progressive tool removal, and for `AgentSession`/`SessionStore`, is marked experimental. This should be reviewed when upgrading Agent Framework versions.
 
 ---
 
 ## SharePoint Integration
 
-The project register is supplied through SharePoint and Copilot Studio.
+The project register lives in an Excel table (`MAQProjectRegister`) in a SharePoint document library. The Copilot Studio flow reads it directly via a "List rows present in a table" action and passes the rows to the backend as `project_register` on every `/delivery/query` call - the backend does not query SharePoint itself.
 
-The Copilot Studio flow retrieves the workbook, converts the file content to Base64, and sends it to the FastAPI `/delivery/query` endpoint.
+---
 
-The backend parses the workbook and converts it into project evidence for the Portfolio Agent.
+## D365 Timesheet Integration
+
+`connectors/d365_timesheet.py` reads a local CSV export of D365 Project Operations timesheets: planned vs. actual vs. billable hours, approval status, and utilization percent, per employee per week. The file path is configured via `D365_TIMESHEETS_PATH` in `.env`, falling back to `data/d365/timesheets.csv` if unset.
 
 ---
 
 ## Copilot Studio Integration
 
-Copilot Studio acts as the conversational entry point.
+Copilot Studio acts as the conversational entry point, with the flow calling this backend as a Tool with free (agent-decided) tool selection - there is no deterministic Topic-based routing.
 
 Typical flow:
 
@@ -434,18 +435,19 @@ Copilot Studio Agent
   v
 Power Automate / Agent Flow
   |
-  +--> Get SharePoint file content
+  +--> List rows present in a table (SharePoint project register)
   |
   +--> POST /delivery/query
+  |       { user_question, user_id (= User.Email), project_register }
   |
   v
-FastAPI Multi-Agent Backend
+FastAPI Backend (Data Retrieval Agent + Insight Orchestrator)
   |
   v
-Answer returned to Copilot Studio
+Answer + sources + report/chart URLs returned to Copilot Studio
 ```
 
-For the user question input, the flow should pass the original activity text rather than an AI-generated expansion so deterministic routing receives the actual user request.
+`user_id` is bound to the trigger's `User.Email` input, so it reflects real Teams identity rather than a value the user could self-declare.
 
 ---
 
@@ -463,14 +465,12 @@ Run:
 pytest -v
 ```
 
-Planned automated coverage includes:
+Current automated coverage includes:
 
-- routing
-- authorization
+- authorization (email allowlist, case-insensitivity, denial cases)
 - prompt-injection detection
 - output secret redaction
-- deterministic delivery-health logic
-- evidence validation
+- `route_question` (kept as a unit-tested utility even though it's not currently wired into the live pipeline - see the note in Repository Structure)
 
 ---
 
@@ -524,13 +524,12 @@ The solution is designed around:
 
 - grounded enterprise evidence
 - deterministic calculations for critical delivery classifications
-- least-privilege access
+- least-privilege access via an explicit allowlist
 - PII protection
 - output secret filtering
 - source attribution
-- explicit domain separation
 - human review for production decisions
-- no unsupported cross-domain causal claims
+- agent-selected (not hardcoded) evidence gathering, without ever inventing evidence a tool didn't return
 
 ---
 
@@ -538,27 +537,28 @@ The solution is designed around:
 
 Implemented:
 
-- Three-agent MAF architecture
-- Conditional and parallel routing
-- Azure DevOps MCP
-- SharePoint evidence
-- Dataverse evidence
-- Hybrid RAG
-- Evidence validation
-- Role-based authorization
+- Two-agent MAF architecture (Data Retrieval Agent + Insight Orchestrator)
+- Agent-driven tool selection across three evidence sources
+- Azure DevOps MCP, including effort-hour tracking
+- SharePoint evidence via the Copilot Studio flow
+- D365 Timesheet evidence via local CSV
+- Hybrid RAG (on the Analyst agent)
+- Evidence validation with retry
+- Email-allowlist authorization
 - PII masking
 - Prompt-injection protection
 - Output secret redaction
+- Deterministic chart + HTML report generation
+- Per-user conversational memory
 - Copilot Studio integration
 
 Next ALM activities:
 
-- automated pytest suite
 - Azure DevOps YAML pipeline
 - Dev / Test / Prod environments
 - Production approval gate
-- observability and monitoring
-- STRIDE threat model
+- observability and monitoring (Azure Application Insights)
+- STRIDE threat model review against the current architecture
 - final architecture and demo documentation
 
 ---
@@ -584,6 +584,7 @@ llama-index==0.14.23
 llama-index-retrievers-bm25==0.7.1
 llama-index-vector-stores-chroma==0.5.5
 llama-index-embeddings-huggingface==0.7.0
+matplotlib
 ```
 
 Pin the complete dependency set in `requirements.txt` before running the Azure DevOps CI/CD pipeline.
@@ -598,21 +599,21 @@ This repository is an implementation and capstone reference for an intelligent c
 
 | STRIDE | Threat | Example | Mitigation |
 |---|---|---|---|
-| Spoofing | User impersonation | Sending another user's ID | Role-based authorization; Entra ID recommended for production |
-| Tampering | Prompt or payload manipulation | "Ignore previous instructions" | Prompt-injection guard and deterministic routing |
-| Repudiation | Lack of request traceability | User denies making a request | Correlation IDs, user logging, timestamps |
+| Spoofing | User impersonation | Claiming another user's identity | Real Teams identity via Copilot Studio `User.Email`, checked against an allowlist; Entra ID recommended for production |
+| Tampering | Prompt or payload manipulation | "Ignore previous instructions" | Prompt-injection guard |
+| Repudiation | Lack of request traceability | User denies making a request | Correlation IDs, user logging, timestamps (planned) |
 | Information Disclosure | PII or secret leakage | Email, phone, API key in response | Presidio masking and output secret redaction |
 | Denial of Service | Excessive agent/tool calls | Repeated MCP invocation | Single-use MCP tool controls and bounded retries |
-| Elevation of Privilege | Access beyond user role | Engineering user requests portfolio data | Authorization before agent/tool execution |
+| Elevation of Privilege | Access beyond allowlist | Non-allowlisted user requests data | Authorization before agent/tool execution |
 
 ## Responsible AI
 
 The solution follows the following Responsible AI principles:
 
-- **Fairness:** access decisions are deterministic and role-based rather than model-driven.
+- **Fairness:** access decisions are a deterministic allowlist check rather than model-driven.
 - **Reliability and Safety:** sprint health is calculated deterministically from Azure DevOps evidence and cannot be overridden by the LLM.
 - **Privacy and Security:** PII is masked before agent execution and secret-like output is redacted before returning a response.
-- **Transparency:** responses track the enterprise sources used.
+- **Transparency:** responses track the enterprise sources actually used for that answer.
 - **Accountability:** Azure DevOps ALM stages and production approval checks provide governance and traceability.
 - **Human Oversight:** agent recommendations support delivery decisions but do not replace management review.
 
@@ -623,13 +624,13 @@ The solution includes lightweight observability to support troubleshooting, perf
 Current logging captures:
 
 - request start and completion
-- routing decisions
 - authorization results
 - prompt-security decisions
 - agent execution status
-- source usage
+- source usage (which of SharePoint / Azure DevOps / Timesheets / MAQ Delivery Knowledge contributed)
 - MCP tool usage
 - evidence validation status
+- report/chart generation
 - final workflow success/failure
 
 Recommended production enhancements:
@@ -645,26 +646,26 @@ Recommended production enhancements:
 
 ```text
 Correlation ID
-     ↓
+     |
+     v
 FastAPI request
-     ↓
-Security checks
-     ↓
-Routing decision
-     ↓
-Portfolio / Engineering agent
-     ↓
-Enterprise data sources
-     ↓
-Analyst agent
-     ↓
+     |
+     v
+Security checks (PII, prompt guard, authorization)
+     |
+     v
+Data Retrieval Agent (SharePoint / Azure DevOps / Timesheets)
+     |
+     v
+Insight Orchestrator (+ Hybrid RAG when needed)
+     |
+     v
+Chart + report generation
+     |
+     v
 Final response
+```
 
+For a presentation, this can be summarized as:
 
-For the presentation, you can summarize it as:
-
-> “The solution logs routing, authorization, tool usage, evidence status, and workflow completion. In production, these logs would be centralized in Azure Application Insights with correlation IDs and latency/error monitoring.”
-
-For speed, I would **not add more observability code now** unless your capstone specifically requires a working correlation ID implementation.
-
-Next we should do the **final architecture diagram**, because that will be used both in the README and the PPT.
+> "The solution logs authorization, tool usage, evidence status, and workflow completion. In production, these logs would be centralized in Azure Application Insights with correlation IDs and latency/error monitoring."

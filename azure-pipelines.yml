@@ -1,12 +1,5 @@
 trigger:
-  branches:
-    include:
-      - '*'
-
-pr:
-  branches:
-    include:
-      - '*'
+- main
 
 pool:
   vmImage: ubuntu-latest
@@ -16,11 +9,11 @@ variables:
 
 stages:
 
-- stage: Dev
-  displayName: DEV
+- stage: Validate
+  displayName: Validate and Test
   jobs:
-  - job: CompileCheck
-    displayName: Compile/import sanity check
+  - job: ValidateJob
+    displayName: Validate Python application
     steps:
 
     - task: UsePythonVersion@0
@@ -37,64 +30,72 @@ stages:
         python -m compileall agents apps connectors mcp_server orchestration retrieval security reporting
       displayName: Python syntax validation
 
+    - script: |
+        pytest -v
+      displayName: Run automated tests
+
+
+- stage: Dev
+  displayName: DEV
+  dependsOn: Validate
+  condition: succeeded()
+  jobs:
+
+  - deployment: DeployDev
+    displayName: Promote to DEV
+    environment: MAQ-Delivery-Dev
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - script: |
+              echo "Promoting build to MAQ-Delivery-Dev"
+              echo "Commit: $(Build.SourceVersion)"
+              echo "Build: $(Build.BuildNumber)"
+            displayName: DEV deployment record
+
 
 - stage: Test
   displayName: TEST
   dependsOn: Dev
   condition: succeeded()
   jobs:
-  - job: RunTests
-    displayName: Automated test suite
-    steps:
 
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '$(pythonVersion)'
-      displayName: Use Python $(pythonVersion)
+  - deployment: DeployTest
+    displayName: Promote to TEST
+    environment: MAQ-Delivery-Test
 
-    - script: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-      displayName: Install dependencies
-
-    - script: |
-        pytest -v
-      displayName: Run automated tests
-
-
-- stage: ManualAttestation
-  displayName: Manual attestation gate
-  dependsOn: Test
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-  jobs:
-  - deployment: AttestManualVerification
-    displayName: Human verifies Teams/Copilot Studio end-to-end behavior
-    environment: MAQ-Delivery-ManualGate
     strategy:
       runOnce:
         deploy:
           steps:
-            - script: |
-                echo "Manual attestation recorded for commit $(Build.SourceVersion)"
-              displayName: Attestation record
+
+          - script: |
+              echo "Promoting build to MAQ-Delivery-Test"
+              echo "Commit: $(Build.SourceVersion)"
+              echo "Build: $(Build.BuildNumber)"
+            displayName: TEST deployment record
 
 
-- stage: Release
-  displayName: PROD / RELEASE
-  dependsOn: ManualAttestation
+- stage: Prod
+  displayName: PROD
+  dependsOn: Test
   condition: succeeded()
   jobs:
-  - job: TagRelease
-    displayName: Tag release version in git
-    steps:
 
-    - checkout: self
-      persistCredentials: true
-      fetchDepth: 0
+  - deployment: DeployProd
+    displayName: Promote to PROD
+    environment: MAQ-Delivery-Prod
 
-    - script: |
-        git config user.email "pipeline@azure.com"
-        git config user.name "Azure Pipeline"
-        git tag release-$(Build.BuildNumber)
-        git push https://$(AZDO_ALM_PAT)@dev.azure.com/shanmukharegidi/Jarvis/_git/Project release-$(Build.BuildNumber)
-      displayName: Tag release
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - script: |
+              echo "Promoting approved build to MAQ-Delivery-Prod"
+              echo "Commit: $(Build.SourceVersion)"
+              echo "Build: $(Build.BuildNumber)"
+            displayName: PROD deployment record

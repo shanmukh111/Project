@@ -31,6 +31,16 @@ def validate_agent_result(
     if not value.summary.strip():
         return False
 
+    if not value.sources:
+        # A "successful" result with zero sources means no tool
+        # was actually called this turn - likely the agent
+        # answering from its own conversational memory of an
+        # earlier identical/similar question instead of gathering
+        # fresh evidence. Treat this as invalid so it retries
+        # (which should trigger a real tool call) rather than
+        # silently accepting a memory-only, ungrounded answer.
+        return False
+
     return True
 
 

@@ -105,7 +105,7 @@ def build_effort_bar_chart(evidence: dict) -> str | None:
     if planned is None and completed is None and remaining is None:
         return None
 
-    labels = ["Planned", "Completed", "Remaining"]
+    labels = ["Original Estimate", "Logged", "Remaining (current)"]
     values = [planned or 0, completed or 0, remaining or 0]
     colors = ["#1565c0", "#2e7d32", "#c62828"]
 
@@ -118,6 +118,21 @@ def build_effort_bar_chart(evidence: dict) -> str | None:
     title = evidence.get("iteration_name") or "Sprint"
     ax.set_title(f"{title} \u2014 Effort Hours")
 
+    # These three come from independently-maintained Azure DevOps
+    # fields (Original Estimate, Completed Work, Remaining Work) and
+    # are not derived from one another - they will not reliably sum
+    # to the estimate. Caption this explicitly so the chart doesn't
+    # read as broken math when they don't add up.
+    fig.text(
+        0.5,
+        0.01,
+        "Tracked independently in Azure DevOps - may not sum exactly.",
+        ha="center",
+        va="bottom",
+        fontsize=7,
+        color="#555555",
+    )
+
     for bar, value in zip(bars, values):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
@@ -126,6 +141,8 @@ def build_effort_bar_chart(evidence: dict) -> str | None:
             ha="center",
             va="bottom",
         )
+
+    fig.subplots_adjust(bottom=0.18)
 
     return _fig_to_base64(fig)
 

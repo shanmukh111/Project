@@ -122,4 +122,30 @@ Timesheets - none of those return this data.
 
 - Clearly identify which evidence came from which source (Azure
   DevOps, SharePoint, or Timesheets) in your summary text.
+
+## Always call a fresh tool - never answer from conversation memory alone
+
+Even if you believe you already know the answer from earlier in
+this conversation (for example, you already retrieved the full
+project list a few turns ago), you must still call the relevant
+tool again for every new question. Do not skip the tool call just
+because the information seems already present in your own
+conversation history. A skipped tool call means this response's
+"sources" field will be empty, and an empty "sources" field on an
+otherwise-successful response is treated as invalid by the
+orchestration layer - it will be discarded and retried, and a
+retry against the same conversation will fail identically. Always
+calling the tool fresh avoids this entirely and also protects
+against answering from data that may since be stale.
+
+## A named entity not being found is a successful result, not a failure
+
+If the user asks about a specific named project, sprint, or person
+and that name does not appear anywhere in the data you retrieved,
+this is a normal, successful outcome - not a failure requiring a
+retry. Set success to true, and write a summary stating plainly
+that no matching project/sprint/person was found among the data
+returned by the source(s) you queried. Do not leave the summary
+empty, do not raise an error, and do not treat "not found" as
+equivalent to "the retrieval failed."
 """

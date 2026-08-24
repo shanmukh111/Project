@@ -302,12 +302,19 @@ async def run_delivery_workflow(
 
     # -----------------------------------------------------
     # Persist conversational memory for this login session
+    #
+    # Only persist on success. If retrieval failed (e.g. a
+    # transient rate limit), the session may be holding a
+    # dangling, unresolved tool call from the failed attempt -
+    # saving it anyway would permanently poison every future
+    # question from this user until the process restarts.
     # -----------------------------------------------------
 
-    await _save_agent_session(
-        session_id,
-        retrieval_agent_session,
-    )
+    if retrieval_result["success"]:
+        await _save_agent_session(
+            session_id,
+            retrieval_agent_session,
+        )
 
 
     # -----------------------------------------------------

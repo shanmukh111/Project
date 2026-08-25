@@ -736,5 +736,186 @@ def get_sprint_summary_by_name(
         }
 
 
+@mcp.tool
+def get_epic_effort_summary(
+    project_id: str,
+) -> dict:
+    """
+    Returns a completion/effort summary for one entire epic
+    (Epic + Feature + User Story + every Task/Bug beneath it),
+    aggregated across ALL of them regardless of which iteration
+    each one is scheduled in.
+
+    Use this instead of get_current_sprint_summary /
+    get_sprint_summary_by_name whenever the question is about a
+    whole epic's overall progress rather than one specific sprint
+    - it does not depend on Azure DevOps' own "current iteration"
+    resolution at all, so it works the same way for an epic
+    that's mid-sprint, not yet started, or spread across several
+    iterations.
+
+    project_id: the epic's SharePoint "Project ID" (e.g.
+    "ALP-001") - this must match the Area Path assigned to that
+    epic's work items (Area Path = "<AZDO_PROJECT>\\<project_id>").
+    If a caller's authorized project_id has never had Area Paths
+    assigned via scripts/azure_devops/assign_area_paths.py, this
+    returns zero items - that migration must run once per Azure
+    DevOps project before this tool can find anything.
+    """
+
+    try:
+        area_path = f"{AZDO_PROJECT}\\{project_id}"
+
+        wiql_url = f"{BASE_URL}/wit/wiql?api-version=7.0"
+
+        query = {
+            "query": f"""
+                SELECT [System.Id]
+                FROM WorkItems
+                WHERE [System.TeamProject] = @project
+                AND [System.AreaPath] = '{area_path}'
+            """
+        }
+
+        wiql_response = httpx.post(
+            wiql_url,
+            headers=get_auth_header(),
+            json=query,
+            timeout=20.0,
+        )
+        wiql_response.raise_for_status()
+
+        ids = [
+            str(item["id"])
+            for item in wiql_response.json().get("workItems", [])
+        ]
+
+        if not ids:
+            return {
+                "success": True,
+                "projectId": project_id,
+                "totalWorkItems": 0,
+                "completedWorkItems": 0,
+                "newWorkItems": 0,
+                "inProgressWorkItems": 0,
+                "completionPercent": 0,
+                "plannedHours": 0,
+                "completedHours": 0,
+                "remainingHours": 0,
+                "items": [],
+                "note": (
+                    f"No work items found under Area Path "
+                    f"'{area_path}'. Either this epic has no work "
+                    f"items yet, or Area Paths have not been "
+                    f"assigned for this project (see "
+                    f"scripts/azure_devops/assign_area_paths.py)."
+                ),
+            }
+
+        ids_param = ",".join(ids)
+
+        details_url = (
+            f"{BASE_URL}/wit/workitems"
+            f"?ids={ids_param}"
+            f"&fields=System.Id,System.Title,System.WorkItemType,"
+            f"System.State,"
+            f"Microsoft.VSTS.Scheduling.OriginalEstimate,"
+            f"Microsoft.VSTS.Scheduling.CompletedWork,"
+            f"Microsoft.VSTS.Scheduling.RemainingWork"
+            f"&api-version=7.0"
+        )
+
+        details_response = httpx.get(
+            details_url,
+            headers=get_auth_header(),
+            timeout=20.0,
+        )
+        details_response.raise_for_status()
+
+        items = []
+        planned_hours_total = 0.0
+        completed_hours_total = 0.0
+        remaining_hours_total = 0.0
+        completed_count = 0
+        new_count = 0
+        in_progress_count = 0
+
+        active_like_states = {
+            "Active",
+            "In Progress",
+            "Committed",
+        }
+
+        for item in details_response.json().get("value", []):
+            fields = item.get("fields", {})
+
+            state = fields.get("System.State", "")
+            work_item_type = fields.get("System.WorkItemType", "")
+
+            planned = fields.get(
+                "Microsoft.VSTS.Scheduling.OriginalEstimate", 0
+            ) or 0
+            completed = fields.get(
+                "Microsoft.VSTS.Scheduling.CompletedWork", 0
+            ) or 0
+            remaining = fields.get(
+                "Microsoft.VSTS.Scheduling.RemainingWork", 0
+            ) or 0
+
+            planned_hours_total += planned
+            completed_hours_total += completed
+            remaining_hours_total += remaining
+
+            if state == "Closed":
+                completed_count += 1
+            elif state in active_like_states:
+                in_progress_count += 1
+            else:
+                new_count += 1
+
+            items.append({
+                "id": fields.get("System.Id"),
+                "title": fields.get("System.Title"),
+                "type": work_item_type,
+                "state": state,
+            })
+
+        total = len(items)
+        completion_percent = (
+            round((completed_count / total) * 100, 1)
+            if total
+            else 0
+        )
+
+        return {
+            "success": True,
+            "projectId": project_id,
+            "totalWorkItems": total,
+            "completedWorkItems": completed_count,
+            "newWorkItems": new_count,
+            "inProgressWorkItems": in_progress_count,
+            "completionPercent": completion_percent,
+            "plannedHours": round(planned_hours_total, 1),
+            "completedHours": round(completed_hours_total, 1),
+            "remainingHours": round(remaining_hours_total, 1),
+            "items": items,
+        }
+
+    except httpx.HTTPStatusError as exc:
+        return {
+            "success": False,
+            "error": "Azure DevOps returned an HTTP error",
+            "status_code": exc.response.status_code,
+            "details": exc.response.text,
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": "Azure DevOps request failed",
+            "details": str(exc),
+        }
+
+
 if __name__ == "__main__":
     mcp.run()

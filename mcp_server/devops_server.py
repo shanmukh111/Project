@@ -258,7 +258,10 @@ def _extract_iteration_number(name: str) -> str | None:
     return match.group(0) if match else None
 
 
-def _build_sprint_summary(iteration: dict) -> dict:
+def _build_sprint_summary(
+    iteration: dict,
+    project_id: str | None = None,
+) -> dict:
     """
     Builds the completion / health-status summary for a single
     iteration dict as returned by the Azure DevOps iterations API.
@@ -266,6 +269,15 @@ def _build_sprint_summary(iteration: dict) -> dict:
     Shared by get_current_sprint_summary and
     get_sprint_summary_by_name so both return identical,
     deterministically-calculated fields.
+
+    If project_id is given, only work items whose Area Path is
+    "{AZDO_PROJECT}\\{project_id}" are included in the summary -
+    this scopes the result to one specific client engagement's
+    epic hierarchy instead of every epic that happens to share
+    this iteration. If project_id is omitted, all work items in
+    the iteration are included, same as before (this is what
+    keeps a plain "what's the current sprint status" question,
+    with no named project, working exactly as it already does).
     """
 
     try:
@@ -326,6 +338,7 @@ def _build_sprint_summary(iteration: dict) -> dict:
             f"?ids={ids_param}"
             f"&fields=System.Id,System.Title,System.WorkItemType,"
             f"System.State,System.AssignedTo,System.IterationPath,"
+            f"System.AreaPath,"
             f"Microsoft.VSTS.Scheduling.OriginalEstimate,"
             f"Microsoft.VSTS.Scheduling.CompletedWork,"
             f"Microsoft.VSTS.Scheduling.RemainingWork"
@@ -338,6 +351,52 @@ def _build_sprint_summary(iteration: dict) -> dict:
             timeout=20.0,
         )
         details_response.raise_for_status()
+
+        all_items = details_response.json().get("value", [])
+
+        if project_id:
+            expected_area_path = f"{AZDO_PROJECT}\\{project_id}"
+
+            all_items = [
+                item
+                for item in all_items
+                if item.get("fields", {}).get("System.AreaPath")
+                == expected_area_path
+            ]
+
+            if not all_items:
+                # The iteration exists, but nothing in it belongs
+                # to this specific project_id's Area Path. This is
+                # a normal, valid outcome (e.g. the project's work
+                # is scheduled in a different iteration) - not an
+                # error, so callers should treat this the same as
+                # any other "no matching evidence" case.
+                return {
+                    "success": True,
+                    "iteration": {
+                        "id": iteration_id,
+                        "name": iteration.get("name"),
+                        "path": iteration.get("path"),
+                        "startDate": attributes.get("startDate"),
+                        "finishDate": attributes.get("finishDate"),
+                        "timeFrame": attributes.get("timeFrame"),
+                    },
+                    "projectId": project_id,
+                    "totalWorkItems": 0,
+                    "completedWorkItems": 0,
+                    "newWorkItems": 0,
+                    "inProgressWorkItems": 0,
+                    "completionPercent": 0,
+                    "plannedHours": 0,
+                    "completedHours": 0,
+                    "remainingHours": 0,
+                    "items": [],
+                    "note": (
+                        f"No work items for project_id '{project_id}' "
+                        f"were found in iteration "
+                        f"'{iteration.get('name')}'."
+                    ),
+                }
 
         items = []
         completed_count = 0
@@ -361,7 +420,7 @@ def _build_sprint_summary(iteration: dict) -> dict:
             "Committed",
         }
 
-        for item in details_response.json().get("value", []):
+        for item in all_items:
             fields = item.get("fields", {})
 
             assigned_to = fields.get("System.AssignedTo")
@@ -473,6 +532,7 @@ def _build_sprint_summary(iteration: dict) -> dict:
                 "finishDate": attributes.get("finishDate"),
                 "timeFrame": attributes.get("timeFrame"),
             },
+            "projectId": project_id,
             "totalWorkItems": total,
             "completedWorkItems": completed_count,
             "newWorkItems": new_count,
@@ -505,8 +565,24 @@ def _build_sprint_summary(iteration: dict) -> dict:
 
 
 @mcp.tool
-def get_current_sprint_summary() -> dict:
-    """Returns summary and work items for the current Azure DevOps iteration."""
+def get_current_sprint_summary(
+    project_id: str | None = None,
+) -> dict:
+    """
+    Returns summary and work items for the current Azure DevOps
+    iteration.
+
+    If the question names a specific client project (the kind of
+    name that appears in the SharePoint project register, e.g.
+    "Finance Reporting Modernization"), first call
+    get_sharepoint_projects to find that project's exact
+    "Project ID" (e.g. "PBI-002"), then pass it here as project_id.
+    This scopes the summary to only that project's own work items,
+    instead of every epic that happens to share this iteration.
+    Omit project_id for a plain "what's the current sprint status"
+    question with no named project - that still returns everyone's
+    combined totals for the iteration, same as before.
+    """
 
     try:
         iterations_url = (
@@ -529,7 +605,10 @@ def get_current_sprint_summary() -> dict:
                 "error": "No current iteration found."
             }
 
-        return _build_sprint_summary(iterations[0])
+        return _build_sprint_summary(
+            iterations[0],
+            project_id=project_id,
+        )
 
     except httpx.HTTPStatusError as exc:
         return {
@@ -548,7 +627,10 @@ def get_current_sprint_summary() -> dict:
 
 
 @mcp.tool
-def get_sprint_summary_by_name(iteration_name: str) -> dict:
+def get_sprint_summary_by_name(
+    iteration_name: str,
+    project_id: str | None = None,
+) -> dict:
     """
     Returns the same completion/health-status summary as
     get_current_sprint_summary, but for a specific named iteration
@@ -558,6 +640,10 @@ def get_sprint_summary_by_name(iteration_name: str) -> dict:
     Use this whenever the user names a specific sprint/iteration.
     Use get_current_sprint_summary only when the user asks about
     the current/active sprint without naming one.
+
+    If the question also names a specific client project, resolve
+    its "Project ID" via get_sharepoint_projects first and pass it
+    here as project_id, same as with get_current_sprint_summary.
     """
 
     try:
@@ -629,7 +715,10 @@ def get_sprint_summary_by_name(iteration_name: str) -> dict:
                 "availableIterations": available_names,
             }
 
-        return _build_sprint_summary(matching_iteration)
+        return _build_sprint_summary(
+            matching_iteration,
+            project_id=project_id,
+        )
 
     except httpx.HTTPStatusError as exc:
         return {

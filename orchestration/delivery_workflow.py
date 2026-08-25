@@ -1,3 +1,4 @@
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -46,6 +47,9 @@ from reporting.charts import (
 
 from security.output_filter import (
     filter_out_of_scope_sources,
+)
+from security.authorization import (
+    resolve_authorized_project,
 )
 
 
@@ -148,6 +152,13 @@ async def run_delivery_workflow(
     # No per-domain routing check is needed here.
     # -----------------------------------------------------
 
+    authorized_project = resolve_authorized_project(user_id)
+
+    print(
+        f"[Workflow] Azure DevOps project scoped to: "
+        f"{authorized_project}"
+    )
+
     print(
         "[Workflow] Running for user:",
         user_id,
@@ -248,7 +259,18 @@ async def run_delivery_workflow(
 
     # -----------------------------------------------------
     # Azure DevOps MCP lifetime
+    #
+    # env is built as a full copy of this process's environment
+    # (so AZDO_ORG, the PAT, PATH, etc. are all still present for
+    # the subprocess) with AZDO_PROJECT overridden per-request to
+    # the calling user's authorized project. The subprocess is
+    # launched fresh on every request anyway, so this correctly
+    # scopes every Azure DevOps tool call to the right project
+    # without any change to devops_server.py itself.
     # -----------------------------------------------------
+
+    mcp_env = dict(os.environ)
+    mcp_env["AZDO_PROJECT"] = authorized_project
 
     async with MCPStdioTool(
         name="azure_devops",
@@ -256,6 +278,7 @@ async def run_delivery_workflow(
         args=[
             "mcp_server/devops_server.py"
         ],
+        env=mcp_env,
     ) as devops_mcp:
 
         async with (

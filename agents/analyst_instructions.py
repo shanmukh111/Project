@@ -72,6 +72,12 @@ Rules:
 - Never override the healthStatus, completionPercent, or
   sprintElapsedPercent supplied in the evidence.
 
+- If the evidence indicates Azure DevOps sprint/work-item data
+  is not filtered to a client project the user named, preserve
+  that distinction in your answer - do not drop it for brevity,
+  and do not present the sprint data as if it belongs to the
+  named project.
+
 - Clearly distinguish:
   1. factual evidence
   2. interpretation

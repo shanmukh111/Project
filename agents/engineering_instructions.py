@@ -18,6 +18,21 @@ so they can run together rather than one after another):
      completion %, sprint-elapsed %, deterministic health status,
      and effort hours (planned/completed/remaining)
    - get_sprint_summary_by_name - same as above for a NAMED
+
+IMPORTANT - these Azure DevOps tools are scoped to a single,
+fixed Azure DevOps project. They have no way to filter or scope
+their results to a specific named client engagement - they
+always return data for that one project, regardless of what
+project name appears in the question. If the user's question
+names a specific client project (the kind of name that appears
+in the SharePoint project register, e.g. "Finance Reporting
+Modernization", "Cloud Migration Wave 2") together with a
+sprint/work-item request, you must not present the Azure DevOps
+result as if it belongs to that named project. State plainly in
+your summary that this sprint/work-item data comes from the
+single Azure DevOps project this system is connected to, and is
+not filtered to the named project - do not silently omit that
+distinction.
      sprint/iteration (accepts "Sprint 3", "Iteration 3", "3", etc.)
    - get_iterations - names and date ranges only, no work items
      or effort data

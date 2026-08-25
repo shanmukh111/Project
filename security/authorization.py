@@ -22,6 +22,59 @@ AUTHORIZED_EMAILS = {
 }
 
 
+# -----------------------------------------------------------------
+# Per-user Azure DevOps project scoping.
+#
+# Azure DevOps tools (mcp_server/devops_server.py) are scoped to a
+# single AZDO_PROJECT, injected as an environment variable when the
+# MCP subprocess is launched fresh for each request (see
+# orchestration/delivery_workflow.py). This maps each authorized
+# email to the one Azure DevOps project their questions should be
+# scoped to - two authorized users can now be answered against two
+# genuinely different projects, rather than the whole system
+# sharing one hardcoded project regardless of who's asking.
+#
+# The project name here must exactly match the real Azure DevOps
+# project name (case-sensitive).
+# -----------------------------------------------------------------
+
+AUTHORIZED_PROJECTS = {
+    "nelanti.kumar@maqsoftware.com": "Alpha",
+    "shanmukha.regidi@maqsoftware.com": "Jarvis",
+}
+
+
+def resolve_authorized_project(email: str) -> str:
+    """
+    Returns the Azure DevOps project name this authorized email
+    is scoped to.
+
+    Callers should only invoke this after authorize_email() has
+    already succeeded for the same email - this function does not
+    re-validate the allowlist itself, and raises AuthorizationError
+    if the email has no project mapping (which should not happen
+    for an already-authorized email; treat it as a configuration
+    gap if it does).
+    """
+
+    normalized_email = email.strip().lower()
+
+    mapping = {
+        mapped_email.lower(): project
+        for mapped_email, project in AUTHORIZED_PROJECTS.items()
+    }
+
+    project = mapping.get(normalized_email)
+
+    if not project:
+        raise AuthorizationError(
+            f"'{email}' is authorized but has no Azure DevOps "
+            "project mapping configured."
+        )
+
+    return project
+
+
 class AuthorizationError(Exception):
     """Raised when the caller's email is not on the allowlist."""
 

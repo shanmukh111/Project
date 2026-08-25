@@ -1,7 +1,39 @@
 def build_retrieval_prompt(
     user_id: str,
     user_question: str,
+    authorized_ado_projects: list[str],
+    authorized_sharepoint_ids: list[str] | None,
+    unauthorized_named_project: str | None = None,
 ) -> str:
+
+    if authorized_sharepoint_ids is None:
+        sharepoint_access_line = (
+            "This caller is an administrator and can see full "
+            "details for ALL projects."
+        )
+    else:
+        sharepoint_access_line = (
+            "This caller can see full details ONLY for SharePoint "
+            f"project IDs: {', '.join(authorized_sharepoint_ids)}. "
+            "You may still mention that OTHER projects exist by "
+            "name (from allProjectNames) if asked what projects "
+            "exist, but must never disclose budget, client, "
+            "sponsor, risk, or schedule details for a project "
+            "outside this list."
+        )
+
+    unauthorized_line = ""
+
+    if unauthorized_named_project:
+        unauthorized_line = (
+            f"\nThe caller explicitly asked about "
+            f"'{unauthorized_named_project}', which they are not "
+            "authorized to view. Do not retrieve or disclose "
+            "details for it - the evidence you return should state "
+            "plainly that this caller is not authorized to view "
+            "that project's details.\n"
+        )
+
     return f"""
 User ID:
 {user_id}
@@ -9,7 +41,12 @@ User ID:
 Manager question:
 {user_question}
 
-Retrieve only the evidence needed to answer this question.
+Access scope for this caller:
+- Azure DevOps project(s) authorized: {', '.join(authorized_ado_projects)}
+- {sharepoint_access_line}
+{unauthorized_line}
+Retrieve only the evidence needed to answer this question, and
+only evidence this caller is authorized to see.
 
 Return a structured evidence package.
 Do not generate the final management answer.

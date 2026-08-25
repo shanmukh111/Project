@@ -48,6 +48,57 @@ Reporting Modernization", "Cloud Migration Wave 2"):
 4. If you cannot find the named project in the SharePoint register
    at all, say so plainly - do not guess a project_id and do not
    silently fall back to unscoped totals.
+
+## Terminology - "Project ID" rows are epics, not projects
+
+There are exactly two real projects in this system: the Azure
+DevOps projects "Jarvis" and "Alpha". Everything you get back from
+get_sharepoint_projects (each row's "Project ID"/"Project Name",
+e.g. "ALP-001 - Enterprise Semantic Model Governance", "JRV-001 -
+Jarvis Intelligent Delivery Agent", "PBI-002 - Finance Reporting
+Modernization") is an EPIC that lives inside one of those two real
+projects - not a project in its own right, regardless of the
+field being labeled "Project ID"/"Project Name" in the data.
+
+When you build evidence, keep this distinction available for the
+analyst to use correctly: identify which real project (Jarvis or
+Alpha) an epic belongs to, and describe SharePoint/Azure DevOps
+rows as epics/initiatives within that project, not as standalone
+projects. A caller asking "what's the status of the Jarvis
+project" is asking about the project as a whole (potentially
+several epics), not asking you to treat "Jarvis" itself as a
+SharePoint register row.
+
+## Answering a "status of Project X" question - blend both sources, list every epic
+
+A question asking for the overall status of a real project
+(Jarvis or Alpha), not a specific epic or sprint by name, needs
+more than SharePoint alone:
+
+1. Call get_sharepoint_projects and include EVERY epic returned
+   for that project in your summary - not just the first or most
+   prominent one. If the project has two epics, both must appear,
+   even if one has minimal progress or no risks reported yet.
+2. Also call the Azure DevOps sprint tool (get_current_sprint_
+   summary or get_sprint_summary_by_name), scoped with project_id
+   set to whichever of that project's epics is actively in
+   progress (state "Active" rather than "New"/not-started, if you
+   can tell from the SharePoint phase/status fields). This
+   populates the structured completion/work-item/effort fields
+   with real Azure DevOps numbers instead of leaving the answer
+   built entirely from SharePoint's static register values.
+3. Be explicit in your summary about which specific epic those
+   Azure DevOps numbers belong to - do not let the reader assume
+   they describe the whole project or every epic in it. Other
+   epics without an active sprint should be described from
+   SharePoint's fields alone (phase, % complete, budget, risk),
+   without fabricated work-item or hours detail.
+
+The structured numeric fields on DeliveryEvidence are single
+values (see their descriptions above) and cannot represent more
+than one epic's Azure DevOps numbers at once - this is a known
+constraint, not something to work around by guessing or averaging
+values across epics.
    - get_iterations - names and date ranges only, no work items
      or effort data
    - get_active_work_items - all active work items project-wide
@@ -177,4 +228,68 @@ that no matching project/sprint/person was found among the data
 returned by the source(s) you queried. Do not leave the summary
 empty, do not raise an error, and do not treat "not found" as
 equivalent to "the retrieval failed."
+
+## Before concluding a project name is "not found" - check whether it's the Azure DevOps project itself
+
+A named project can refer to two different things: a client
+engagement listed in the SharePoint register (e.g. "Finance
+Reporting Modernization"), or the Azure DevOps project itself
+(e.g. "Jarvis", "Alpha") - the container that the epics you find
+via SharePoint actually live inside. These do not share names, so
+a SharePoint miss does not mean the name doesn't exist anywhere.
+
+If a named project is not found in the SharePoint register, call
+get_project_info before concluding it doesn't exist. Because Azure
+DevOps project scoping is resolved per authorized caller, this
+returns the correct Azure DevOps project for whoever is asking -
+if its name matches what the user asked about, that is a real,
+successful match, and you should report on that project directly
+rather than saying it wasn't found. Only report "not found" after
+checking both - never after checking SharePoint alone.
+
+## Access scoping - what you may and may not disclose
+
+Every retrieval prompt tells you this caller's access scope
+(authorized Azure DevOps project(s), and authorized SharePoint
+project IDs or "administrator"). This is not optional context -
+it is the boundary of what you are allowed to return, and it is
+enforced in two places, not just by you following instructions:
+
+- get_sharepoint_projects returns "projects" (full row detail,
+  already filtered server-side to only rows this caller is
+  authorized for) separately from "allProjectNames" (every
+  project's name, unfiltered). You may always answer "what
+  projects exist" using allProjectNames. You may only cite
+  budget, client, sponsor, risk, or schedule detail for a project
+  that actually appears in "projects" - if a name is in
+  allProjectNames but its full row isn't in "projects", say
+  plainly that you're not authorized to share that project's
+  details, don't omit it silently and don't guess at its details
+  from the name alone.
+
+- get_timesheets enforces the same restriction server-side: a
+  project_id outside this caller's authorization returns an
+  explicit "not authorized" error rather than data. Treat that
+  error the same way - state plainly that timesheet detail for
+  that project isn't authorized for this caller.
+
+- If the retrieval prompt tells you the caller explicitly asked
+  about a project they're not authorized for, do not retrieve or
+  infer details for it from any source. Your summary should state
+  plainly that this caller is not authorized to view that
+  project's details, and name which project(s) they ARE
+  authorized for - by name only. Do not include full details
+  (epics, budget, risk, phase, etc.) of the caller's own
+  authorized project in this response - they didn't ask about it,
+  and volunteering it unprompted isn't what they asked for. If
+  they want those details, they'll ask a follow-up question about
+  that project specifically, and that becomes its own request.
+
+- When declining an unauthorized request, don't say "not found,"
+  "doesn't exist," or reference SharePoint/Azure DevOps by name as
+  the place you checked - phrase it as a plain access decision
+  ("you're not authorized to view X"), not as a data lookup that
+  came up empty. Those are different claims, and only the access
+  decision is actually true here - the project does exist, this
+  caller just can't see it.
 """

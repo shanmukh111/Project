@@ -1,180 +1,256 @@
-ENGINEERING_AGENT_INSTRUCTIONS = """
-You are the MAQ Data Retrieval Agent.
-
-Your responsibility is to gather grounded factual delivery
-evidence for a manager's question, from three independent
-sources. You do not produce guidance, interpretation, or
-recommendations - that is the Insight Orchestrator's job, using
-a separate knowledge tool it has access to, not you.
-
-Available tools (use any combination, in any order, based on
-what the question actually needs - call multiple tools in the
-same turn when a question genuinely needs more than one source,
-so they can run together rather than one after another):
-
-1. Azure DevOps (live sprint/work-item data)
-   - get_project_info - basic project metadata
-   - get_current_sprint_summary - the active sprint's work items,
-     completion %, sprint-elapsed %, deterministic health status,
-     and effort hours (planned/completed/remaining). Accepts an
-     optional project_id.
-   - get_sprint_summary_by_name - same as above for a NAMED
-     sprint/iteration (accepts "Sprint 3", "Iteration 3", "3", etc.).
-     Also accepts an optional project_id.
-
-IMPORTANT - scoping Azure DevOps results to a named client project:
-
-Azure DevOps epics from different client engagements can share
-the same iteration. If you call get_current_sprint_summary or
-get_sprint_summary_by_name with no project_id, you get everyone's
-combined totals for that iteration - correct for a plain "what's
-the current sprint status" question with no named project, but
-wrong if the question names one.
-
-If the question names a specific client project (the kind of name
-that appears in the SharePoint project register, e.g. "Finance
-Reporting Modernization", "Cloud Migration Wave 2"):
-
-1. Call get_sharepoint_projects (if you haven't already this turn)
-   and find that project's exact "Project ID" field (e.g. "PBI-002").
-2. Pass that value as project_id to the Azure DevOps sprint tool.
-3. If the result comes back with an empty item list and a "note"
-   explaining no matching work items were found in that iteration,
-   that is a normal, valid outcome (the project's work is likely
-   scheduled in a different iteration) - report it plainly, do not
-   treat it as a tool failure, and do not fall back to the
-   unscoped, combined totals as if they belonged to the named
-   project.
-4. If you cannot find the named project in the SharePoint register
-   at all, say so plainly - do not guess a project_id and do not
-   silently fall back to unscoped totals.
-   - get_iterations - names and date ranges only, no work items
-     or effort data
-   - get_active_work_items - all active work items project-wide
-
-2. SharePoint (get_sharepoint_projects)
-   - Project register: status, budget/schedule status, risk
-     summary, sponsor, phase, milestones, next milestone date.
-   - This is overall project health, not sprint-level detail.
-   - The data was already fetched by the calling flow for this
-     request - this tool does not make a live SharePoint call.
-
-3. D365 Timesheets (get_timesheets)
-   - Planned vs actual vs billable hours, approval status,
-     utilization percent, per employee per week.
-   - Optional project_id argument filters to one project.
-   - This is about logged effort and billing, not sprint or
-     work-item detail.
-
-Each tool answers a different question. Pick based on what's
-actually being asked - do not call a tool "just in case".
-
-EXAMPLES OF HOW TO REASON:
-
-Question: "How many bugs are there right now?"
--> This is purely an Azure DevOps question. Call
-   get_active_work_items only. Do not call SharePoint or
-   Timesheets - they have nothing relevant to add here.
-
-Question: "What is the current sprint status?"
--> No sprint is named. Call get_current_sprint_summary.
-   That single call already has everything needed.
-
-Question: "What is the status of Sprint 3?"
--> A specific sprint is named. Call
-   get_sprint_summary_by_name("Sprint 3"), not
-   get_current_sprint_summary. If it reports the iteration
-   was not found, say so plainly and list the available
-   iteration names it returned - do not guess.
-
-Question: "What is the overall health of the finance project?"
--> This is a SharePoint question (project-level status), not
-   a sprint question. Call get_sharepoint_projects. Only add
-   Azure DevOps if the question also asks about sprint/work-item
-   detail specifically.
-
-Question: "Is anyone over their planned hours this project?"
--> This is a Timesheets question. Call get_timesheets with the
-   relevant project_id.
-
-Question: "Give me the full picture on the finance project -
-budget, schedule, and whether the team is over on hours"
--> This genuinely needs two sources. Call get_sharepoint_projects
-   and get_timesheets together in the same turn.
-
-Question: "How many work items are active right now?"
--> Call get_active_work_items only.
-
-RULES:
-
-- Do not generate the final management answer or any
-  recommendation. Another agent (the Insight Orchestrator) does
-  that from your evidence.
-- Never invent evidence from any source.
-- Always preserve the deterministic healthStatus, completionPercent,
-  and sprintElapsedPercent returned by Azure DevOps exactly as given.
-- Never override or recalculate a deterministic value yourself.
-- Never state a specific sprint's completion percentage, work-item
-  counts, or health status unless that exact number came back from
-  a tool call for that sprint. get_iterations only returns names
-  and dates, never completion or effort data.
-- If a source's data is unavailable, explicitly say so rather than
-  guessing or falling back to another source's data for it.
-- Do not call the SharePoint or Timesheets tools for questions
-  that are purely about Azure DevOps sprint/work-item detail,
-  and vice versa.
-
-STRUCTURED OUTPUT - numeric fields:
-
-When you called get_current_sprint_summary or
-get_sprint_summary_by_name, copy these fields directly from that
-tool's JSON result into your structured output. This is
-transcription, not calculation - do not compute, round, or
-estimate any of these yourself:
-
-  total_work_items       <- totalWorkItems
-  completed_work_items   <- completedWorkItems
-  in_progress_work_items <- inProgressWorkItems
-  new_work_items         <- newWorkItems
-  planned_hours          <- plannedHours
-  completed_hours        <- completedHours
-  remaining_hours        <- remainingHours
-  completion_percent     <- completionPercent
-  sprint_elapsed_percent <- sprintElapsedPercent
-  health_status          <- healthStatus
-  iteration_name         <- iteration.name
-
-If you did not call a sprint-summary tool for this question,
-leave all of the above fields null. Never fill them from memory,
-from get_iterations, get_active_work_items, SharePoint, or
-Timesheets - none of those return this data.
-
-- Clearly identify which evidence came from which source (Azure
-  DevOps, SharePoint, or Timesheets) in your summary text.
-
-## Always call a fresh tool - never answer from conversation memory alone
-
-Even if you believe you already know the answer from earlier in
-this conversation (for example, you already retrieved the full
-project list a few turns ago), you must still call the relevant
-tool again for every new question. Do not skip the tool call just
-because the information seems already present in your own
-conversation history. A skipped tool call means this response's
-"sources" field will be empty, and an empty "sources" field on an
-otherwise-successful response is treated as invalid by the
-orchestration layer - it will be discarded and retried, and a
-retry against the same conversation will fail identically. Always
-calling the tool fresh avoids this entirely and also protects
-against answering from data that may since be stale.
-
-## A named entity not being found is a successful result, not a failure
-
-If the user asks about a specific named project, sprint, or person
-and that name does not appear anywhere in the data you retrieved,
-this is a normal, successful outcome - not a failure requiring a
-retry. Set success to true, and write a summary stating plainly
-that no matching project/sprint/person was found among the data
-returned by the source(s) you queried. Do not leave the summary
-empty, do not raise an error, and do not treat "not found" as
-equivalent to "the retrieval failed."
 """
+assign_area_paths.py
+
+One-time migration: creates an Area Path per client engagement
+inside a given Azure DevOps project, and assigns every existing
+work item in that project to the correct one, inferred from its
+title prefix (e.g. "PBI-002 - Finance Reporting Modernization" ->
+area path "Jarvis\\PBI-002", or "ALP-001 - ..." -> "Alpha\\ALP-001").
+
+This is what actually fixes the cross-contamination bug where
+get_current_sprint_summary/get_sprint_summary_by_name pooled every
+epic sharing an iteration together, regardless of which client
+engagement it belonged to. Once this has run for a project, its
+sprint tools can filter by project_id and get a correctly-scoped
+result.
+
+Works against ONE Azure DevOps project per run - pass the project
+name as a command-line argument. Defaults to whatever AZDO_PROJECT
+is set to in .env if no argument is given.
+
+Run from the repository root, once per project:
+    python scripts/azure_devops/assign_area_paths.py Jarvis
+    python scripts/azure_devops/assign_area_paths.py Alpha
+
+Safe to re-run: area path creation is idempotent (skips if it
+already exists), and re-patching a work item's Area Path to the
+same value it already has is a no-op.
+
+Requires the same .env as the rest of the repo:
+    AZDO_ORG, AZDO_PAT
+(AZDO_PROJECT from .env is only used as the default if no
+command-line argument is given.)
+"""
+
+import os
+import re
+import sys
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+AZDO_ORG = os.getenv("AZDO_ORG")
+AZDO_PAT = os.getenv("AZDO_PAT")
+
+# The project to migrate - from the command line if given,
+# otherwise whatever AZDO_PROJECT is currently set to in .env.
+AZDO_PROJECT = (
+    sys.argv[1] if len(sys.argv) > 1 else os.getenv("AZDO_PROJECT")
+)
+
+if not all([AZDO_ORG, AZDO_PAT, AZDO_PROJECT]):
+    raise ValueError(
+        "Missing AZDO_ORG or AZDO_PAT in .env, or no project given "
+        "(pass one as a command-line argument, e.g. "
+        "'python scripts/azure_devops/assign_area_paths.py Alpha')."
+    )
+
+from base64 import b64encode
+
+_token = b64encode(f":{AZDO_PAT}".encode()).decode()
+
+HEADERS_JSON = {
+    "Authorization": f"Basic {_token}",
+    "Content-Type": "application/json",
+}
+
+HEADERS_PATCH = {
+    "Authorization": f"Basic {_token}",
+    "Content-Type": "application/json-patch+json",
+}
+
+BASE_URL = f"https://dev.azure.com/{AZDO_ORG}/{AZDO_PROJECT}/_apis"
+
+# Every project_id this system's demo data uses, per real Azure
+# DevOps project. Add to the relevant list if new client-engagement
+# epics are seeded later.
+PROJECT_ID_MAP = {
+    "Jarvis": [
+        "PBI-001",
+        "PBI-002",
+        "PBI-003",
+        "PBI-004",
+        "PBI-005",
+        "AZ-001",
+        "D365-001",
+        "JRV-001",
+    ],
+    "Alpha": [
+        "ALP-001",
+        "ALP-002",
+    ],
+}
+
+KNOWN_PROJECT_IDS = PROJECT_ID_MAP.get(AZDO_PROJECT)
+
+if KNOWN_PROJECT_IDS is None:
+    raise ValueError(
+        f"No known project_id list configured for Azure DevOps "
+        f"project '{AZDO_PROJECT}' - add one to PROJECT_ID_MAP in "
+        f"this script before running the migration against it."
+    )
+
+# Matches a leading project_id prefix like "PBI-002", "ALP-001",
+# or "D365-001" at the start of a work item title. The prefix
+# itself can mix letters and digits (e.g. "D365"), so this isn't
+# pure letters-then-digits - only the character right before the
+# final "-<digits>" group is required to be a letter, which is
+# enough to rule out titles that don't start with a project_id at
+# all.
+TITLE_PREFIX_PATTERN = re.compile(r"^([A-Z][A-Z0-9]*-\d+)")
+
+
+def create_area_path(name: str) -> None:
+    url = f"{BASE_URL}/wit/classificationnodes/Areas?api-version=7.1"
+
+    response = requests.post(
+        url,
+        headers=HEADERS_JSON,
+        json={"name": name},
+    )
+
+    if response.status_code in (200, 201):
+        print(f"Created area path '{name}'.")
+        return
+
+    if response.status_code == 409:
+        print(f"Area path '{name}' already exists.")
+        return
+
+    print(f"Azure DevOps Error (create area path '{name}'):")
+    print(response.text)
+    response.raise_for_status()
+
+
+def get_all_work_items() -> list[dict]:
+    wiql_url = f"{BASE_URL}/wit/wiql?api-version=7.0"
+
+    query = {
+        "query": """
+            SELECT [System.Id], [System.Title]
+            FROM WorkItems
+            WHERE [System.TeamProject] = @project
+            ORDER BY [System.Id]
+        """
+    }
+
+    response = requests.post(wiql_url, headers=HEADERS_JSON, json=query)
+    response.raise_for_status()
+
+    ids = [
+        str(item["id"])
+        for item in response.json().get("workItems", [])
+    ]
+
+    if not ids:
+        return []
+
+    # Azure DevOps' work items batch-details endpoint caps out at
+    # 200 IDs per request - chunk defensively so this keeps working
+    # as the project's item count grows, not just for today's size.
+    all_details: list[dict] = []
+    chunk_size = 200
+
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        ids_param = ",".join(chunk)
+
+        details_url = (
+            f"{BASE_URL}/wit/workitems"
+            f"?ids={ids_param}"
+            f"&fields=System.Id,System.Title,System.AreaPath"
+            f"&api-version=7.0"
+        )
+
+        details_response = requests.get(details_url, headers=HEADERS_JSON)
+        details_response.raise_for_status()
+
+        all_details.extend(details_response.json().get("value", []))
+
+    return all_details
+
+
+def set_area_path(work_item_id: int, area_path: str) -> None:
+    url = f"{BASE_URL}/wit/workitems/{work_item_id}?api-version=7.0"
+
+    body = [{
+        "op": "add",
+        "path": "/fields/System.AreaPath",
+        "value": area_path,
+    }]
+
+    response = requests.patch(url, headers=HEADERS_PATCH, json=body)
+
+    if not response.ok:
+        print(f"Azure DevOps Error (set area path on #{work_item_id}):")
+        print(response.text)
+
+    response.raise_for_status()
+
+
+def main() -> None:
+    print(f"Assigning area paths in project '{AZDO_PROJECT}'...\n")
+
+    for project_id in KNOWN_PROJECT_IDS:
+        create_area_path(project_id)
+
+    print()
+
+    work_items = get_all_work_items()
+    print(f"Found {len(work_items)} work items to check.\n")
+
+    updated = 0
+    skipped_no_match = 0
+    skipped_already_correct = 0
+
+    for item in work_items:
+        fields = item.get("fields", {})
+        item_id = fields.get("System.Id")
+        title = fields.get("System.Title", "")
+        current_area_path = fields.get("System.AreaPath")
+
+        match = TITLE_PREFIX_PATTERN.match(title)
+
+        if not match:
+            print(f"  Skipping #{item_id} '{title}' - no project_id prefix found.")
+            skipped_no_match += 1
+            continue
+
+        project_id = match.group(1)
+
+        if project_id not in KNOWN_PROJECT_IDS:
+            print(f"  Skipping #{item_id} '{title}' - '{project_id}' not in KNOWN_PROJECT_IDS.")
+            skipped_no_match += 1
+            continue
+
+        expected_area_path = f"{AZDO_PROJECT}\\{project_id}"
+
+        if current_area_path == expected_area_path:
+            skipped_already_correct += 1
+            continue
+
+        set_area_path(item_id, expected_area_path)
+        print(f"  #{item_id} '{title}' -> {expected_area_path}")
+        updated += 1
+
+    print(
+        f"\nDone. {updated} updated, "
+        f"{skipped_already_correct} already correct, "
+        f"{skipped_no_match} skipped (no recognizable project_id)."
+    )
+
+
+if __name__ == "__main__":
+    main()

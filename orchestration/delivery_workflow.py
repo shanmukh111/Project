@@ -49,7 +49,8 @@ from security.output_filter import (
     filter_out_of_scope_sources,
 )
 from security.authorization import (
-    resolve_authorized_project,
+    get_access_profile,
+    resolve_ado_project_for_question,
 )
 
 
@@ -152,12 +153,22 @@ async def run_delivery_workflow(
     # No per-domain routing check is needed here.
     # -----------------------------------------------------
 
-    authorized_project = resolve_authorized_project(user_id)
+    access = get_access_profile(user_id)
+
+    scoped_ado_project, unauthorized_named_project = (
+        resolve_ado_project_for_question(access, user_question)
+    )
 
     print(
         f"[Workflow] Azure DevOps project scoped to: "
-        f"{authorized_project}"
+        f"{scoped_ado_project}"
     )
+
+    if unauthorized_named_project:
+        print(
+            f"[Workflow] Caller asked about unauthorized "
+            f"project: {unauthorized_named_project}"
+        )
 
     print(
         "[Workflow] Running for user:",
@@ -180,6 +191,7 @@ async def run_delivery_workflow(
         build_engineering_tools(
             mark_source=mark_source,
             project_register=project_register,
+            authorized_sharepoint_ids=access.sharepoint_project_ids,
         )
     )
 
@@ -270,7 +282,7 @@ async def run_delivery_workflow(
     # -----------------------------------------------------
 
     mcp_env = dict(os.environ)
-    mcp_env["AZDO_PROJECT"] = authorized_project
+    mcp_env["AZDO_PROJECT"] = scoped_ado_project
 
     async with MCPStdioTool(
         name="azure_devops",
@@ -300,6 +312,9 @@ async def run_delivery_workflow(
                 prompt = build_retrieval_prompt(
                     user_id=user_id,
                     user_question=user_question,
+                    authorized_ado_projects=access.ado_projects,
+                    authorized_sharepoint_ids=access.sharepoint_project_ids,
+                    unauthorized_named_project=unauthorized_named_project,
                 )
 
                 return await retrieval_agent.run(
